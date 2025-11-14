@@ -2,75 +2,143 @@ import streamlit as st
 import pdfplumber
 import json
 from openai import OpenAI
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+import os
 
-import streamlit as st
-from openai import OpenAI
-
+# -----------------------------------------------------
+# Load OpenAI client using Streamlit Cloud secret
+# -----------------------------------------------------
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-SYSTEM_PROMPT = open("system_prompt.txt").read()  # saves the agent prompt in a file
+# -----------------------------------------------------
+# Load system prompt (Chile Hangtag Template Agent)
+# -----------------------------------------------------
+SYSTEM_PROMPT = open("system_prompt.txt").read()
 
-st.title("Chile Hangtag Generator")
+
+# -----------------------------------------------------
+# SMART DEDUPLICATION FUNCTION
+# Removes repeated lines but keeps original order
+# -----------------------------------------------------
+def dedupe_text(raw_text):
+    seen = set()
+    unique_lines = []
+    for line in raw_text.split("\n"):
+        clean = line.strip()
+        if clean and clean not in seen:
+            seen.add(clean)
+            unique_lines.append(clean)
+    return "\n".join(unique_lines)
+
+
+# -----------------------------------------------------
+# Streamlit UI
+# -----------------------------------------------------
+st.title("🇨🇱 Chile Hangtag Generator")
+st.write("Upload a PDF and automatically generate a ZPL hangtag label.")
 
 uploaded_pdf = st.file_uploader("Upload PDF", type=["pdf"])
 
 if uploaded_pdf:
+
+    # -------------------------------------------------
+    # Extract text from PDF
+    # -------------------------------------------------
     with pdfplumber.open(uploaded_pdf) as pdf:
         pdf_text = ""
         for page in pdf.pages:
-            pdf_text += page.extract_text() + "\n"
+            page_text = page.extract_text()
+            if page_text:
+                pdf_text += page_text + "\n"
 
-    st.subheader("Extracted Text")
-    st.code(pdf_text, language="plaintext")
+    # Apply deduplication BEFORE sending to ChatGPT
+    cleaned_text = dedupe_text(pdf_text)
 
-    if st.button("Generate ZPL"):
-        with st.spinner("Generating..."):
+    st.subheader("Extracted Text (Cleaned)")
+    st.code(cleaned_text, language="plaintext")
 
-            response = client.chat.completions.create(
-                model="gpt-4.1",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": pdf_text}
-                ]
-            )
+    # -------------------------------------------------
+    # Generate ZPL using ChatGPT
+    # -------------------------------------------------
+    if st.button("Generate ZPL Label"):
 
-            json_output = json.loads(response.choices[0].message.content)
+        with st.spinner("Generating label..."):
 
-        st.success("ZPL Generated!")
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-4.1",
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": cleaned_text}
+                    ]
+                )
 
+                output_json = response.choices[0].message.content
+                data = json.loads(output_json)
+
+            except Exception as e:
+                st.error(f"OpenAI Error: {str(e)}")
+                st.stop()
+
+        st.success("ZPL generated successfully!")
+
+        # -------------------------------------------------
+        # Display extracted fields
+        # -------------------------------------------------
         st.subheader("Extracted Fields")
-        st.json(json_output)
+        st.json(data)
 
-        zpl_code = json_output["zpl"]
+        # -------------------------------------------------
+        # Display ZPL Code
+        # -------------------------------------------------
+        zpl_code = data["zpl"]
 
         st.subheader("ZPL Output")
         st.code(zpl_code, language="plaintext")
 
+        # -------------------------------------------------
+        # Provide ZPL file download
+        # -------------------------------------------------
         st.download_button(
-            label="Download ZPL",
+            label="⬇️ Download ZPL File",
             data=zpl_code,
-            file_name="label.zpl",
+            file_name="hangtag.zpl",
             mime="text/plain"
         )
 
-        # OPTIONAL PDF GENERATION
-        from reportlab.pdfgen import canvas
-        from reportlab.lib.pagesizes import letter
-
-        pdf_path = "/tmp/output.pdf"
-        c = canvas.Canvas(pdf_path, pagesize=letter)
+        # -------------------------------------------------
+        # Create a preview PDF (raw ZPL text only)
+        # -------------------------------------------------
+        pdf_output_path = "/tmp/zpl_output.pdf"
+        c = canvas.Canvas(pdf_output_path, pagesize=letter)
         c.setFont("Helvetica", 12)
-        c.drawString(30, 750, "ZPL Hangtag Preview (raw text):")
+        c.drawString(30, 750, "ZPL Output (Raw Preview):")
+
         y = 720
         for line in zpl_code.split("\n"):
             c.drawString(30, y, line)
             y -= 15
+            if y < 40:  # New page if needed
+                c.showPage()
+                c.setFont("Helvetica", 12)
+                y = 750
+
         c.save()
 
-        with open(pdf_path, "rb") as f:
+        with open(pdf_output_path, "rb") as f:
             st.download_button(
-                label="Download PDF (raw ZPL text)",
+                label="⬇️ Download PDF Preview",
                 data=f,
-                file_name="zpl_output.pdf",
+                file_name="hangtag_preview.pdf",
                 mime="application/pdf"
             )
+
+        st.info("PDF preview is ONLY the ZPL text, not a visual render.")
+
+
+# -----------------------------------------------------
+# Footer
+# -----------------------------------------------------
+st.markdown("---")
+st.caption("Developed by Cesar Beninatto — Automated Chile Hangtag Generator")
