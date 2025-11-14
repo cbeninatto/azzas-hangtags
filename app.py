@@ -2,6 +2,7 @@ import streamlit as st
 import pdfplumber
 import json
 import requests
+import base64
 from openai import OpenAI
 
 # ---------------------------------
@@ -18,7 +19,6 @@ client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # Load Chile Hangtag system prompt
 SYSTEM_PROMPT = open("system_prompt.txt").read()
-
 
 # ---------------------------------
 # HELPER FUNCTIONS
@@ -44,13 +44,13 @@ def base_name(filename):
 
 
 def convert_zpl(zpl_code, target="pdf"):
-    """Use LabelZoom v2 API to convert ZPL → PDF or PNG."""
+    """Use LabelZoom v2 API to convert ZPL → PDF."""
     url = f"https://api.labelzoom.net/api/v2/convert/zpl/to/{target}"
 
     headers = {
         "Authorization": f"Bearer {st.secrets['LABELZOOM_API_KEY']}",
         "Content-Type": "text/plain",
-        "User-Agent": "Mozilla/5.0"  # Prevent Cloudflare WAF blocking
+        "User-Agent": "Mozilla/5.0"
     }
 
     params = {
@@ -71,6 +71,16 @@ def convert_zpl(zpl_code, target="pdf"):
     else:
         st.error(f"LabelZoom Error ({target.upper()}): {response.text}")
         return None
+
+
+def show_pdf_in_iframe(pdf_bytes):
+    """Display PDF bytes inside Streamlit using an iframe."""
+    base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+    pdf_display = f'''
+        <iframe src="data:application/pdf;base64,{base64_pdf}" 
+        width="100%" height="700" type="application/pdf"></iframe>
+    '''
+    st.markdown(pdf_display, unsafe_allow_html=True)
 
 
 def process_pdf(uploaded_file):
@@ -99,7 +109,6 @@ def process_pdf(uploaded_file):
 # ---------------------------------
 # CLIPBOARD HELPER
 # ---------------------------------
-
 def copy_to_clipboard(text):
     st.session_state["clipboard"] = text
     st.toast("ZPL copied to clipboard!")
@@ -124,13 +133,13 @@ if uploaded_pdfs:
 
             st.markdown("---")
 
-            # Extract data first
+            # Extract fields
             extracted_text, data = process_pdf(pdf_file)
             zpl_code = data["zpl"]
             name_base = base_name(pdf_file.name)
 
             # ------------------------------
-            # TOP ROW: File name + buttons
+            # TOP ROW: FILENAME + BUTTONS
             # ------------------------------
             cols = st.columns([4, 1, 1])
             cols[0].markdown(f"### 📄 {pdf_file.name}")
@@ -152,7 +161,7 @@ if uploaded_pdfs:
                 key=f"copy_zpl_{pdf_file.name}"
             )
 
-            # Invisible input to support clipboard storage
+            # Invisible clipboard field (Streamlit workaround)
             st.text_input(
                 "clipboard",
                 st.session_state.get("clipboard", ""),
@@ -162,24 +171,27 @@ if uploaded_pdfs:
             )
 
             # ------------------------------
-            # PREVIEWS SECTION
+            # PDF PREVIEW
             # ------------------------------
-            st.markdown("### Preview")
+            st.markdown("### PDF Preview")
 
-            # PDF preview via LabelZoom
             pdf_preview = convert_zpl(zpl_code, target="pdf")
-            if pdf_preview:
-                st.pdf(pdf_preview)
 
-            # PNG preview via LabelZoom
-            png_preview = convert_zpl(zpl_code, target="png")
-            if png_preview:
-                st.image(png_preview)
+            if pdf_preview:
+                show_pdf_in_iframe(pdf_preview)
+
+                # Download PDF preview button
+                st.download_button(
+                    label="⬇️ Download PDF Preview",
+                    data=pdf_preview,
+                    file_name=f"{name_base}_preview.pdf",
+                    mime="application/pdf",
+                    key=f"download_pdf_preview_{pdf_file.name}"
+                )
 
             # ------------------------------
             # COLLAPSIBLE RAW DATA
             # ------------------------------
-
             with st.expander("Extracted Fields (click to expand)"):
                 st.json(data)
 
