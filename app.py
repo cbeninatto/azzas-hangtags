@@ -1,26 +1,27 @@
 import streamlit as st
 import pdfplumber
 import json
+import requests
 from openai import OpenAI
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
-import os
+from io import BytesIO
+import zipfile
 
-# -----------------------------------------------------
-# Load OpenAI client using Streamlit Cloud secret
-# -----------------------------------------------------
+# -------------------------------
+# INIT
+# -------------------------------
+
+st.set_page_config(page_title="BAYONA SPA", layout="centered")
+
+st.title("BAYONA SPA")
+st.write("Upload one or multiple PDFs to generate ZPL hangtags with automatic LabelZoom rendering.")
+
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-
-# -----------------------------------------------------
-# Load system prompt (Chile Hangtag Template Agent)
-# -----------------------------------------------------
 SYSTEM_PROMPT = open("system_prompt.txt").read()
 
 
-# -----------------------------------------------------
-# SMART DEDUPLICATION FUNCTION
-# Removes repeated lines but keeps original order
-# -----------------------------------------------------
+# -------------------------------
+# SMART DEDUPLICATION
+# -------------------------------
 def dedupe_text(raw_text):
     seen = set()
     unique_lines = []
@@ -32,113 +33,119 @@ def dedupe_text(raw_text):
     return "\n".join(unique_lines)
 
 
-# -----------------------------------------------------
-# Streamlit UI
-# -----------------------------------------------------
-st.title("🇨🇱 Chile Hangtag Generator")
-st.write("Upload a PDF and automatically generate a ZPL hangtag label.")
+# -------------------------------
+# LABELZOOM – ZPL → PDF, PNG
+# -------------------------------
+def convert_zpl(zpl_code, filetype="pdf"):
+    url = f"https://api.labelzoom.net/api/convert/zpl/{filetype}"
 
-uploaded_pdf = st.file_uploader("Upload PDF", type=["pdf"])
+    headers = {
+        "Authorization": f"Bearer {st.secrets['LABELZOOM_API_KEY']}",
+        "Content-Type": "application/json"
+    }
 
-if uploaded_pdf:
+    payload = {
+        "zpl": zpl_code,
+        "dpi": 203
+    }
 
-    # -------------------------------------------------
-    # Extract text from PDF
-    # -------------------------------------------------
-    with pdfplumber.open(uploaded_pdf) as pdf:
-        pdf_text = ""
+    response = requests.post(url, headers=headers, json=payload)
+
+    if response.status_code == 200:
+        return response.content
+    else:
+        st.error(f"LabelZoom Error ({filetype.upper()}): {response.text}")
+        return None
+
+
+# -------------------------------
+# PROCESS PDF → JSON + ZPL
+# -------------------------------
+def process_pdf(uploaded_file):
+    with pdfplumber.open(uploaded_file) as pdf:
+        text = ""
         for page in pdf.pages:
             page_text = page.extract_text()
             if page_text:
-                pdf_text += page_text + "\n"
+                text += page_text + "\n"
 
-    # Apply deduplication BEFORE sending to ChatGPT
-    cleaned_text = dedupe_text(pdf_text)
+    cleaned = dedupe_text(text)
 
-    st.subheader("Extracted Text (Cleaned)")
-    st.code(cleaned_text, language="plaintext")
+    response = client.chat.completions.create(
+        model="gpt-4.1",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": cleaned}
+        ]
+    )
 
-    # -------------------------------------------------
-    # Generate ZPL using ChatGPT
-    # -------------------------------------------------
-    if st.button("Generate ZPL Label"):
+    result_json = json.loads(response.choices[0].message.content)
+    return cleaned, result_json
 
-        with st.spinner("Generating label..."):
 
-            try:
-                response = client.chat.completions.create(
-                    model="gpt-4.1",
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": cleaned_text}
-                    ]
-                )
+# -------------------------------
+# MULTI-PDF UPLOAD
+# -------------------------------
+uploaded_pdfs = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
 
-                output_json = response.choices[0].message.content
-                data = json.loads(output_json)
+if uploaded_pdfs:
 
-            except Exception as e:
-                st.error(f"OpenAI Error: {str(e)}")
-                st.stop()
+    for pdf_file in uploaded_pdfs:
 
-        st.success("ZPL generated successfully!")
+        st.markdown("---")
+        st.subheader(f"Processing: **{pdf_file.name}**")
 
-        # -------------------------------------------------
-        # Display extracted fields
-        # -------------------------------------------------
-        st.subheader("Extracted Fields")
-        st.json(data)
+        with st.spinner("Extracting and generating label…"):
+            extracted_text, data = process_pdf(pdf_file)
 
-        # -------------------------------------------------
-        # Display ZPL Code
-        # -------------------------------------------------
         zpl_code = data["zpl"]
 
-        st.subheader("ZPL Output")
+        # SHOW FIELDS
+        st.markdown("### Extracted Fields")
+        st.json(data)
+
+        # SHOW CLEANED TEXT
+        with st.expander("Show cleaned extracted PDF text"):
+            st.code(extracted_text)
+
+        # ZPL OUTPUT
+        st.markdown("### ZPL Output")
         st.code(zpl_code, language="plaintext")
 
-        # -------------------------------------------------
-        # Provide ZPL file download
-        # -------------------------------------------------
+        # DOWNLOAD ZPL
         st.download_button(
-            label="⬇️ Download ZPL File",
+            label=f"⬇️ Download ZPL ({pdf_file.name.replace('.pdf', '')})",
             data=zpl_code,
-            file_name="hangtag.zpl",
+            file_name=f"{pdf_file.name.replace('.pdf','')}.zpl",
             mime="text/plain"
         )
 
-        # -------------------------------------------------
-        # Create a preview PDF (raw ZPL text only)
-        # -------------------------------------------------
-        pdf_output_path = "/tmp/zpl_output.pdf"
-        c = canvas.Canvas(pdf_output_path, pagesize=letter)
-        c.setFont("Helvetica", 12)
-        c.drawString(30, 750, "ZPL Output (Raw Preview):")
-
-        y = 720
-        for line in zpl_code.split("\n"):
-            c.drawString(30, y, line)
-            y -= 15
-            if y < 40:  # New page if needed
-                c.showPage()
-                c.setFont("Helvetica", 12)
-                y = 750
-
-        c.save()
-
-        with open(pdf_output_path, "rb") as f:
+        # LABELZOOM RENDER – PDF
+        pdf_preview = convert_zpl(zpl_code, filetype="pdf")
+        if pdf_preview:
+            st.markdown("### LabelZoom PDF Preview")
             st.download_button(
-                label="⬇️ Download PDF Preview",
-                data=f,
-                file_name="hangtag_preview.pdf",
+                label=f"⬇️ Download PDF Preview ({pdf_file.name.replace('.pdf','')})",
+                data=pdf_preview,
+                file_name=f"{pdf_file.name.replace('.pdf','')}_preview.pdf",
                 mime="application/pdf"
             )
+            st.pdf(pdf_preview)
 
-        st.info("PDF preview is ONLY the ZPL text, not a visual render.")
+        # LABELZOOM RENDER – PNG
+        png_preview = convert_zpl(zpl_code, filetype="png")
+        if png_preview:
+            st.markdown("### LabelZoom PNG Preview")
+            st.image(png_preview)
+
+            st.download_button(
+                label=f"⬇️ Download PNG Preview ({pdf_file.name.replace('.pdf','')})",
+                data=png_preview,
+                file_name=f"{pdf_file.name.replace('.pdf','')}_preview.png",
+                mime="image/png"
+            )
 
 
-# -----------------------------------------------------
-# Footer
-# -----------------------------------------------------
+# FOOTER
 st.markdown("---")
-st.caption("Developed by Cesar Beninatto — Automated Chile Hangtag Generator")
+st.caption("Automated Hangtag System — BAYONA SPA")
