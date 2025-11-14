@@ -3,7 +3,10 @@ import pdfplumber
 import json
 from openai import OpenAI
 
-import streamlit as st from openai import OpenAI  client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+import streamlit as st
+from openai import OpenAI
+
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 SYSTEM_PROMPT = open("system_prompt.txt").read()  # saves the agent prompt in a file
 
