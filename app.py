@@ -44,15 +44,20 @@ def base_name(filename):
 
 
 def convert_zpl(zpl_code, target="pdf"):
-    """Use LabelZoom API to convert ZPL → PDF or PNG."""
-    url = f"https://api.labelzoom.net/convert/zpl/to/{target}"
+    """Use LabelZoom v2 API to convert ZPL → PDF or PNG."""
+    url = f"https://api.labelzoom.net/api/v2/convert/zpl/to/{target}"
 
     headers = {
         "Authorization": f"Bearer {st.secrets['LABELZOOM_API_KEY']}",
-        "Content-Type": "text/plain"
+        "Content-Type": "text/plain",
+        "User-Agent": "Mozilla/5.0"  # Prevent Cloudflare WAF blocking
     }
 
-    params = {"dpi": 203}
+    params = {
+        "dpi": 203,
+        "pdf": {"conversionMode": "IMAGE"},
+        "label": {"width": 4, "height": 6}
+    }
 
     response = requests.post(
         url,
@@ -92,6 +97,15 @@ def process_pdf(uploaded_file):
 
 
 # ---------------------------------
+# CLIPBOARD HELPER
+# ---------------------------------
+
+def copy_to_clipboard(text):
+    st.session_state["clipboard"] = text
+    st.toast("ZPL copied to clipboard!")
+
+
+# ---------------------------------
 # FILE UPLOAD
 # ---------------------------------
 
@@ -105,72 +119,75 @@ if uploaded_pdfs:
 
     for pdf_file in uploaded_pdfs:
 
-        st.markdown("---")
-        st.subheader(f"Processing: **{pdf_file.name}**")
+        file_container = st.container()
+        with file_container:
 
-        with st.spinner("Generating label…"):
+            st.markdown("---")
+
+            # Extract data first
             extracted_text, data = process_pdf(pdf_file)
+            zpl_code = data["zpl"]
+            name_base = base_name(pdf_file.name)
 
-        zpl_code = data["zpl"]
-        name_base = base_name(pdf_file.name)
+            # ------------------------------
+            # TOP ROW: File name + buttons
+            # ------------------------------
+            cols = st.columns([4, 1, 1])
+            cols[0].markdown(f"### 📄 {pdf_file.name}")
 
-        # ---------------------------------
-        # ALWAYS SHOW DOWNLOAD BUTTONS FIRST
-        # ---------------------------------
-        st.markdown("### Download Files")
-
-        # ZPL
-        st.download_button(
-            label=f"⬇️ Download ZPL",
-            data=zpl_code,
-            file_name=f"{name_base}.zpl",
-            mime="text/plain"
-        )
-
-        # PDF preview (LabelZoom)
-        pdf_preview = convert_zpl(zpl_code, target="pdf")
-        if pdf_preview:
-            st.download_button(
-                label=f"⬇️ Download PDF Preview",
-                data=pdf_preview,
-                file_name=f"{name_base}_preview.pdf",
-                mime="application/pdf"
+            # DOWNLOAD ZPL BUTTON
+            cols[1].download_button(
+                label="⬇️ ZPL",
+                data=zpl_code,
+                file_name=f"{name_base}.zpl",
+                mime="text/plain",
+                key=f"download_zpl_{pdf_file.name}"
             )
 
-        # PNG preview (LabelZoom)
-        png_preview = convert_zpl(zpl_code, target="png")
-        if png_preview:
-            st.download_button(
-                label=f"⬇️ Download PNG Preview",
-                data=png_preview,
-                file_name=f"{name_base}_preview.png",
-                mime="image/png"
+            # COPY ZPL BUTTON
+            cols[2].button(
+                "📋 Copy",
+                on_click=copy_to_clipboard,
+                args=(zpl_code,),
+                key=f"copy_zpl_{pdf_file.name}"
             )
 
-        # ---------------------------------
-        # COLLAPSIBLE FIELDS (HIDDEN BY DEFAULT)
-        # ---------------------------------
+            # Invisible input to support clipboard storage
+            st.text_input(
+                "clipboard",
+                st.session_state.get("clipboard", ""),
+                type="password",
+                label_visibility="collapsed",
+                key=f"clipboard_field_{pdf_file.name}"
+            )
 
-        with st.expander("Extracted Fields (click to expand)", expanded=False):
-            st.json(data)
+            # ------------------------------
+            # PREVIEWS SECTION
+            # ------------------------------
+            st.markdown("### Preview")
 
-        with st.expander("Cleaned Extracted Text (click to expand)", expanded=False):
-            st.code(extracted_text)
+            # PDF preview via LabelZoom
+            pdf_preview = convert_zpl(zpl_code, target="pdf")
+            if pdf_preview:
+                st.pdf(pdf_preview)
 
-        with st.expander("ZPL Output (click to expand)", expanded=False):
-            st.code(zpl_code, language="plaintext")
+            # PNG preview via LabelZoom
+            png_preview = convert_zpl(zpl_code, target="png")
+            if png_preview:
+                st.image(png_preview)
 
-        # ---------------------------------
-        # PREVIEWS (PDF + PNG)
-        # ---------------------------------
+            # ------------------------------
+            # COLLAPSIBLE RAW DATA
+            # ------------------------------
 
-        if pdf_preview:
-            st.markdown("### PDF Preview")
-            st.pdf(pdf_preview)
+            with st.expander("Extracted Fields (click to expand)"):
+                st.json(data)
 
-        if png_preview:
-            st.markdown("### PNG Preview")
-            st.image(png_preview)
+            with st.expander("Extracted Text (click to expand)"):
+                st.code(extracted_text)
+
+            with st.expander("ZPL Output (click to expand)"):
+                st.code(zpl_code, language="plaintext")
 
 
 # ---------------------------------
