@@ -16,15 +16,14 @@ st.write("Upload one or multiple PDFs to generate ZPL hangtags automatically.")
 # ---------------------------------
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-# Load Chile Hangtag system prompt
+# Load prompt
 SYSTEM_PROMPT = open("system_prompt.txt").read()
 
 # ---------------------------------
-# HELPER FUNCTIONS
+# HELPERS
 # ---------------------------------
 
 def dedupe_text(raw_text):
-    """Remove duplicate lines while keeping original order."""
     seen = set()
     unique = []
     for line in raw_text.split("\n"):
@@ -34,16 +33,12 @@ def dedupe_text(raw_text):
             unique.append(clean)
     return "\n".join(unique)
 
-
 def base_name(filename):
-    """Return filename without .pdf/.PDF extension."""
     if filename.lower().endswith(".pdf"):
         return filename[:-4]
     return filename
 
-
 def process_pdf(uploaded_file):
-    """Extract text, dedupe, send to ChatGPT, return structured data."""
     with pdfplumber.open(uploaded_file) as pdf:
         text = ""
         for page in pdf.pages:
@@ -64,6 +59,27 @@ def process_pdf(uploaded_file):
     result_json = json.loads(response.choices[0].message.content)
     return cleaned, result_json
 
+# ---------------------------------
+# COPY BUTTON (JS)
+# ---------------------------------
+def copy_button(label, text, key):
+    safe_text = text.replace("`", "'")  # avoid breaking JS template literal
+    button_html = f"""
+        <script>
+        function copyToClipboard_{key}() {{
+            navigator.clipboard.writeText(`{safe_text}`);
+        }}
+        </script>
+        <button onclick="copyToClipboard_{key}()" style="
+            border-radius: 5px;
+            padding: 6px 14px;
+            background-color: #eee;
+            border: 1px solid #ccc;
+            cursor: pointer;
+            font-size: 14px;
+        ">{label}</button>
+    """
+    st.markdown(button_html, unsafe_allow_html=True)
 
 # ---------------------------------
 # FILE UPLOAD
@@ -76,57 +92,44 @@ uploaded_pdfs = st.file_uploader(
 )
 
 if uploaded_pdfs:
-
     for pdf_file in uploaded_pdfs:
 
-        file_container = st.container()
+        container = st.container()
+        with container:
 
-        with file_container:
             st.markdown("---")
 
-            # Extract fields
             extracted_text, data = process_pdf(pdf_file)
             zpl_code = data["zpl"]
             name_base = base_name(pdf_file.name)
 
-            # ------------------------------
-            # TOP ROW: FILENAME + BUTTONS
-            # ------------------------------
+            # TOP ROW
             cols = st.columns([4, 1, 1])
             cols[0].markdown(f"### 📄 {pdf_file.name}")
 
-            # DOWNLOAD ZPL BUTTON
+            # ZPL DOWNLOAD
             cols[1].download_button(
                 label="⬇️ ZPL",
                 data=zpl_code,
                 file_name=f"{name_base}.zpl",
                 mime="text/plain",
-                key=f"download_zpl_{pdf_file.name}"
+                key=f"dl_{pdf_file.name}"
             )
 
-            # COPY ZPL BUTTON (new, clean version)
-            cols[2].button(
-                "📋 Copy",
-                on_click=lambda z=zpl_code: st.clipboard(z),
-                key=f"copy_zpl_{pdf_file.name}"
-            )
+            # COPY BUTTON (JS)
+            with cols[2]:
+                copy_button("📋 Copy", zpl_code, f"copy_{pdf_file.name}")
 
-            # ------------------------------
-            # COLLAPSIBLE RAW DATA
-            # ------------------------------
-
-            with st.expander("Extracted Fields (click to expand)"):
+            # COLLAPSIBLE SECTIONS
+            with st.expander("Extracted Fields"):
                 st.json(data)
 
-            with st.expander("Extracted Text (click to expand)"):
+            with st.expander("Extracted Text"):
                 st.code(extracted_text)
 
-            with st.expander("ZPL Output (click to expand)"):
+            with st.expander("ZPL Output"):
                 st.code(zpl_code, language="plaintext")
 
-
-# ---------------------------------
 # FOOTER
-# ---------------------------------
 st.markdown("---")
 st.caption("Automated Hangtag System — BAYONA SPA")
