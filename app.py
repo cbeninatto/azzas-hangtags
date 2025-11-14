@@ -67,25 +67,25 @@ def process_pdf(uploaded_file, progress):
 # ---------------------------------
 # COPY BUTTON (JS)
 # ---------------------------------
+import streamlit.components.v1 as components
+
 def copy_button_inline(label, text, key):
-    safe_text = text.replace("`", "'")
-    button_html = f"""
-        <script>
-        function copyToClipboard_{key}() {{
-            navigator.clipboard.writeText(`{safe_text}`);
-        }}
-        </script>
-        <button onclick="copyToClipboard_{key}()" style="
-            border-radius: 5px;
-            padding: 6px 14px;
-            background-color: #eee;
-            border: 1px solid #ccc;
-            cursor: pointer;
-            font-size: 14px;
-            margin-top: 28px;
-        ">{label}</button>
+    safe_text = text.replace("`", "\\`")  # protect backticks
+    html = f"""
+        <button onclick="navigator.clipboard.writeText(`{safe_text}`)"
+            style="
+                border-radius: 6px;
+                padding: 6px 14px;
+                background-color: #f0f0f0;
+                border: 1px solid #ccc;
+                cursor: pointer;
+                font-size: 14px;
+                margin-top: 28px;
+            ">
+            {label}
+        </button>
     """
-    st.markdown(button_html, unsafe_allow_html=True)
+    components.html(html, height=40)
 
 # ---------------------------------
 # FILE UPLOAD
