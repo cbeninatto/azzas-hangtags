@@ -43,25 +43,28 @@ def base_name(filename):
     return filename
 
 
-def convert_zpl(zpl_code, filetype="pdf"):
-    url = f"https://api.labelzoom.net/convert/zpl/{filetype}"
+def convert_zpl(zpl_code, target="pdf"):
+    """Use LabelZoom API to convert ZPL → PDF or PNG."""
+    url = f"https://api.labelzoom.net/convert/zpl/to/{target}"
 
     headers = {
         "Authorization": f"Bearer {st.secrets['LABELZOOM_API_KEY']}",
-        "Content-Type": "application/json"
+        "Content-Type": "text/plain"
     }
 
-    payload = {
-        "zpl": zpl_code,
-        "dpi": 203
-    }
+    params = {"dpi": 203}
 
-    response = requests.post(url, headers=headers, json=payload)
+    response = requests.post(
+        url,
+        headers=headers,
+        params={"params": json.dumps(params)},
+        data=zpl_code
+    )
 
     if response.status_code == 200:
         return response.content
     else:
-        st.error(f"LabelZoom Error ({filetype.upper()}): {response.text}")
+        st.error(f"LabelZoom Error ({target.upper()}): {response.text}")
         return None
 
 
@@ -105,63 +108,70 @@ if uploaded_pdfs:
         st.markdown("---")
         st.subheader(f"Processing: **{pdf_file.name}**")
 
-        with st.spinner("Extracting and generating label…"):
+        with st.spinner("Generating label…"):
             extracted_text, data = process_pdf(pdf_file)
 
         zpl_code = data["zpl"]
         name_base = base_name(pdf_file.name)
 
         # ---------------------------------
-        # DISPLAY DATA
+        # ALWAYS SHOW DOWNLOAD BUTTONS FIRST
         # ---------------------------------
+        st.markdown("### Download Files")
 
-        st.markdown("### Extracted Fields")
-        st.json(data)
-
-        with st.expander("Show cleaned extracted PDF text"):
-            st.code(extracted_text)
-
-        st.markdown("### ZPL Output")
-        st.code(zpl_code, language="plaintext")
-
-        # ---------------------------------
-        # DOWNLOAD RAW ZPL
-        # ---------------------------------
+        # ZPL
         st.download_button(
-            label=f"⬇️ Download ZPL ({pdf_file.name})",
+            label=f"⬇️ Download ZPL",
             data=zpl_code,
             file_name=f"{name_base}.zpl",
             mime="text/plain"
         )
 
-        # ---------------------------------
-        # LABELZOOM PDF RENDER
-        # ---------------------------------
-        pdf_preview = convert_zpl(zpl_code, filetype="pdf")
+        # PDF preview (LabelZoom)
+        pdf_preview = convert_zpl(zpl_code, target="pdf")
         if pdf_preview:
-            st.markdown("### LabelZoom PDF Preview")
-            st.pdf(pdf_preview)
             st.download_button(
-                label=f"⬇️ Download PDF Preview ({pdf_file.name})",
+                label=f"⬇️ Download PDF Preview",
                 data=pdf_preview,
                 file_name=f"{name_base}_preview.pdf",
                 mime="application/pdf"
             )
 
-        # ---------------------------------
-        # LABELZOOM PNG RENDER
-        # ---------------------------------
-        png_preview = convert_zpl(zpl_code, filetype="png")
+        # PNG preview (LabelZoom)
+        png_preview = convert_zpl(zpl_code, target="png")
         if png_preview:
-            st.markdown("### LabelZoom PNG Preview")
-            st.image(png_preview)
-
             st.download_button(
-                label=f"⬇️ Download PNG Preview ({pdf_file.name})",
+                label=f"⬇️ Download PNG Preview",
                 data=png_preview,
                 file_name=f"{name_base}_preview.png",
                 mime="image/png"
             )
+
+        # ---------------------------------
+        # COLLAPSIBLE FIELDS (HIDDEN BY DEFAULT)
+        # ---------------------------------
+
+        with st.expander("Extracted Fields (click to expand)", expanded=False):
+            st.json(data)
+
+        with st.expander("Cleaned Extracted Text (click to expand)", expanded=False):
+            st.code(extracted_text)
+
+        with st.expander("ZPL Output (click to expand)", expanded=False):
+            st.code(zpl_code, language="plaintext")
+
+        # ---------------------------------
+        # PREVIEWS (PDF + PNG)
+        # ---------------------------------
+
+        if pdf_preview:
+            st.markdown("### PDF Preview")
+            st.pdf(pdf_preview)
+
+        if png_preview:
+            st.markdown("### PNG Preview")
+            st.image(png_preview)
+
 
 # ---------------------------------
 # FOOTER
