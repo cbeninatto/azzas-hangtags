@@ -2,7 +2,6 @@ import streamlit as st
 import pdfplumber
 import json
 import requests
-import base64
 from openai import OpenAI
 
 # ---------------------------------
@@ -10,7 +9,7 @@ from openai import OpenAI
 # ---------------------------------
 st.set_page_config(page_title="BAYONA SPA", layout="centered")
 st.title("BAYONA SPA")
-st.write("Upload one or multiple PDFs to generate ZPL hangtags with automatic LabelZoom rendering.")
+st.write("Upload one or multiple PDFs to generate ZPL hangtags automatically.")
 
 # ---------------------------------
 # INIT OPENAI
@@ -43,46 +42,6 @@ def base_name(filename):
     return filename
 
 
-def convert_zpl(zpl_code, target="pdf"):
-    """Use LabelZoom v2 API to convert ZPL → PDF."""
-    url = f"https://api.labelzoom.net/api/v2/convert/zpl/to/{target}"
-
-    headers = {
-        "Authorization": f"Bearer {st.secrets['LABELZOOM_API_KEY']}",
-        "Content-Type": "text/plain",
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    params = {
-        "dpi": 203,
-        "pdf": {"conversionMode": "IMAGE"},
-        "label": {"width": 4, "height": 6}
-    }
-
-    response = requests.post(
-        url,
-        headers=headers,
-        params={"params": json.dumps(params)},
-        data=zpl_code
-    )
-
-    if response.status_code == 200:
-        return response.content
-    else:
-        st.error(f"LabelZoom Error ({target.upper()}): {response.text}")
-        return None
-
-
-def show_pdf_in_iframe(pdf_bytes):
-    """Display PDF bytes inside Streamlit using an iframe."""
-    base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
-    pdf_display = f'''
-        <iframe src="data:application/pdf;base64,{base64_pdf}" 
-        width="100%" height="700" type="application/pdf"></iframe>
-    '''
-    st.markdown(pdf_display, unsafe_allow_html=True)
-
-
 def process_pdf(uploaded_file):
     """Extract text, dedupe, send to ChatGPT, return structured data."""
     with pdfplumber.open(uploaded_file) as pdf:
@@ -107,14 +66,6 @@ def process_pdf(uploaded_file):
 
 
 # ---------------------------------
-# CLIPBOARD HELPER
-# ---------------------------------
-def copy_to_clipboard(text):
-    st.session_state["clipboard"] = text
-    st.toast("ZPL copied to clipboard!")
-
-
-# ---------------------------------
 # FILE UPLOAD
 # ---------------------------------
 
@@ -129,8 +80,8 @@ if uploaded_pdfs:
     for pdf_file in uploaded_pdfs:
 
         file_container = st.container()
-        with file_container:
 
+        with file_container:
             st.markdown("---")
 
             # Extract fields
@@ -153,45 +104,17 @@ if uploaded_pdfs:
                 key=f"download_zpl_{pdf_file.name}"
             )
 
-            # COPY ZPL BUTTON
+            # COPY ZPL BUTTON (new, clean version)
             cols[2].button(
                 "📋 Copy",
-                on_click=copy_to_clipboard,
-                args=(zpl_code,),
+                on_click=lambda z=zpl_code: st.clipboard(z),
                 key=f"copy_zpl_{pdf_file.name}"
             )
-
-            # Invisible clipboard field (Streamlit workaround)
-            st.text_input(
-                "clipboard",
-                st.session_state.get("clipboard", ""),
-                type="password",
-                label_visibility="collapsed",
-                key=f"clipboard_field_{pdf_file.name}"
-            )
-
-            # ------------------------------
-            # PDF PREVIEW
-            # ------------------------------
-            st.markdown("### PDF Preview")
-
-            pdf_preview = convert_zpl(zpl_code, target="pdf")
-
-            if pdf_preview:
-                show_pdf_in_iframe(pdf_preview)
-
-                # Download PDF preview button
-                st.download_button(
-                    label="⬇️ Download PDF Preview",
-                    data=pdf_preview,
-                    file_name=f"{name_base}_preview.pdf",
-                    mime="application/pdf",
-                    key=f"download_pdf_preview_{pdf_file.name}"
-                )
 
             # ------------------------------
             # COLLAPSIBLE RAW DATA
             # ------------------------------
+
             with st.expander("Extracted Fields (click to expand)"):
                 st.json(data)
 
