@@ -113,20 +113,20 @@ if uploaded_pdfs:
         # FILE HEADER + BUTTONS (ALL IN ONE ROW)
         # ---------------------------------
         cols = st.columns([4, 1, 1])
-        cols[0].markdown(f"### 📄 {pdf_file.name}")
+cols[0].markdown(f"### 📄 {pdf_file.name}")
 
-        # DOWNLOAD ZPL BUTTON
-        cols[1].download_button(
-            label="⬇️ ZPL",
-            data=zpl_code,
-            file_name=f"{name_base}.zpl",
-            mime="text/plain",
-            key=f"dl_zpl_{pdf_file.name}"
-        )
+# Download button
+cols[1].download_button(
+    label="⬇️ ZPL",
+    data=zpl_code,
+    file_name=f"{name_base}.zpl",
+    mime="text/plain",
+    key=f"dl_zpl_{pdf_file.name}"
+)
 
-        # COPY ZPL BUTTON — NOW NEXT TO FILENAME
-        with cols[2]:
-            copy_button_inline("📋 Copy", zpl_code, key=f"copy_{pdf_file.name}")
+# Copy button (Clean + Safe)
+with cols[2]:
+    copy_button_inline("📋 Copy", zpl_code, key=f"copy_{pdf_file.name}")
 
         # ---------------------------------
         # COLLAPSIBLE SECTIONS
