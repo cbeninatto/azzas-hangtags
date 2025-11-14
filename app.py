@@ -3,40 +3,48 @@ import pdfplumber
 import json
 import requests
 from openai import OpenAI
-from io import BytesIO
-import zipfile
 
-# -------------------------------
-# INIT
-# -------------------------------
-
+# ---------------------------------
+# STREAMLIT PAGE CONFIG
+# ---------------------------------
 st.set_page_config(page_title="BAYONA SPA", layout="centered")
-
 st.title("BAYONA SPA")
 st.write("Upload one or multiple PDFs to generate ZPL hangtags with automatic LabelZoom rendering.")
 
+# ---------------------------------
+# INIT OPENAI
+# ---------------------------------
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
+# Load Chile Hangtag system prompt
 SYSTEM_PROMPT = open("system_prompt.txt").read()
 
 
-# -------------------------------
-# SMART DEDUPLICATION
-# -------------------------------
+# ---------------------------------
+# HELPER FUNCTIONS
+# ---------------------------------
+
 def dedupe_text(raw_text):
+    """Remove duplicate lines while keeping original order."""
     seen = set()
-    unique_lines = []
+    unique = []
     for line in raw_text.split("\n"):
         clean = line.strip()
         if clean and clean not in seen:
             seen.add(clean)
-            unique_lines.append(clean)
-    return "\n".join(unique_lines)
+            unique.append(clean)
+    return "\n".join(unique)
 
 
-# -------------------------------
-# LABELZOOM – ZPL → PDF, PNG
-# -------------------------------
+def base_name(filename):
+    """Return filename without .pdf/.PDF extension."""
+    if filename.lower().endswith(".pdf"):
+        return filename[:-4]
+    return filename
+
+
 def convert_zpl(zpl_code, filetype="pdf"):
+    """Use LabelZoom API to convert ZPL → PDF or PNG."""
     url = f"https://api.labelzoom.net/api/convert/zpl/{filetype}"
 
     headers = {
@@ -58,10 +66,8 @@ def convert_zpl(zpl_code, filetype="pdf"):
         return None
 
 
-# -------------------------------
-# PROCESS PDF → JSON + ZPL
-# -------------------------------
 def process_pdf(uploaded_file):
+    """Extract text, dedupe, send to ChatGPT, return structured data."""
     with pdfplumber.open(uploaded_file) as pdf:
         text = ""
         for page in pdf.pages:
@@ -83,10 +89,15 @@ def process_pdf(uploaded_file):
     return cleaned, result_json
 
 
-# -------------------------------
-# MULTI-PDF UPLOAD
-# -------------------------------
-uploaded_pdfs = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
+# ---------------------------------
+# FILE UPLOAD
+# ---------------------------------
+
+uploaded_pdfs = st.file_uploader(
+    "Upload PDFs",
+    type=["pdf"],
+    accept_multiple_files=True
+)
 
 if uploaded_pdfs:
 
@@ -99,53 +110,62 @@ if uploaded_pdfs:
             extracted_text, data = process_pdf(pdf_file)
 
         zpl_code = data["zpl"]
+        name_base = base_name(pdf_file.name)
 
-        # SHOW FIELDS
+        # ---------------------------------
+        # DISPLAY DATA
+        # ---------------------------------
+
         st.markdown("### Extracted Fields")
         st.json(data)
 
-        # SHOW CLEANED TEXT
         with st.expander("Show cleaned extracted PDF text"):
             st.code(extracted_text)
 
-        # ZPL OUTPUT
         st.markdown("### ZPL Output")
         st.code(zpl_code, language="plaintext")
 
-        # DOWNLOAD ZPL
+        # ---------------------------------
+        # DOWNLOAD RAW ZPL
+        # ---------------------------------
         st.download_button(
-            label=f"⬇️ Download ZPL ({pdf_file.name.replace('.pdf', '')})",
+            label=f"⬇️ Download ZPL ({pdf_file.name})",
             data=zpl_code,
-            file_name=f"{pdf_file.name.replace('.pdf','')}.zpl",
+            file_name=f"{name_base}.zpl",
             mime="text/plain"
         )
 
-        # LABELZOOM RENDER – PDF
+        # ---------------------------------
+        # LABELZOOM PDF RENDER
+        # ---------------------------------
         pdf_preview = convert_zpl(zpl_code, filetype="pdf")
         if pdf_preview:
             st.markdown("### LabelZoom PDF Preview")
+            st.pdf(pdf_preview)
             st.download_button(
-                label=f"⬇️ Download PDF Preview ({pdf_file.name.replace('.pdf','')})",
+                label=f"⬇️ Download PDF Preview ({pdf_file.name})",
                 data=pdf_preview,
-                file_name=f"{pdf_file.name.replace('.pdf','')}_preview.pdf",
+                file_name=f"{name_base}_preview.pdf",
                 mime="application/pdf"
             )
-            st.pdf(pdf_preview)
 
-        # LABELZOOM RENDER – PNG
+        # ---------------------------------
+        # LABELZOOM PNG RENDER
+        # ---------------------------------
         png_preview = convert_zpl(zpl_code, filetype="png")
         if png_preview:
             st.markdown("### LabelZoom PNG Preview")
             st.image(png_preview)
 
             st.download_button(
-                label=f"⬇️ Download PNG Preview ({pdf_file.name.replace('.pdf','')})",
+                label=f"⬇️ Download PNG Preview ({pdf_file.name})",
                 data=png_preview,
-                file_name=f"{pdf_file.name.replace('.pdf','')}_preview.png",
+                file_name=f"{name_base}_preview.png",
                 mime="image/png"
             )
 
-
+# ---------------------------------
 # FOOTER
+# ---------------------------------
 st.markdown("---")
 st.caption("Automated Hangtag System — BAYONA SPA")
