@@ -66,6 +66,10 @@ DESCRIPTION RULES
 
 SPECIFIC RULES:
 - If the word “PORTA” appears alone (e.g., "NEUTRAL PEQUENA–PORTA"), expand it to “PORTA CARTÃO”.
+- If DESCRIPTION contains the word MEDIA or GRANDE AND does NOT contain the word BOLSA, prepend “BOLSA ”.
+  Examples:
+      MEDIA → BOLSA MEDIA
+      GRANDE → BOLSA GRANDE
 - Join multi-line descriptions using “ / ” when appropriate, or a space when natural.
 - Preserve dashes (–), accents, and exact words.
 - Remove line breaks and extra spaces.
@@ -76,19 +80,19 @@ SKU RULES
 -------------------------------------
 - The SKU you must extract is the SPACED format:
       C 40008 0003 0001
-  (a “C” followed by three digit groups separated by spaces)
-- Many PDFs contain both:
+- PDFs may contain both:
       C 40008 0003 0001 U C400080003AA
   The correct SKU is ONLY:
       C 40008 0003 0001
-- NEVER use compressed codes such as "C400080003AA". These are internal codes and must be ignored.
+- NEVER use compressed codes such as “C400080003AA”. These are internal codes and must be ignored.
 - Preserve the original spacing exactly.
+- Output must be uppercase.
 
 -------------------------------------
 BARCODE RULES
 -------------------------------------
-- BARCODE must be digits only, with no spaces or hyphens.
-- If multiple barcodes appear, choose the 13-digit EAN/GTIN (e.g., 7900xxxxxxxxx).
+- BARCODE must be digits only, no spaces or hyphens.
+- If multiple numbers appear, choose the 13-digit EAN/GTIN (e.g., 7900xxxxxxxxx).
 
 -------------------------------------
 IMPORTER & RUT RULES
@@ -99,18 +103,18 @@ IMPORTER & RUT RULES
 - RUT must ALWAYS be present.
   DEFAULT:
       80.582.900-1
-- Only replace these defaults if the PDF explicitly provides different importer data.
+- Only replace these defaults if the PDF explicitly includes different importer information.
 
 -------------------------------------
 FALLBACK RULES
 -------------------------------------
-- If DESCRIPTION, SKU, or BARCODE truly cannot be found, return that field as an empty string but keep the ZPL lines intact.
-- IMPORTER_NAME and RUT must NEVER be empty (use defaults).
+- If DESCRIPTION, SKU, or BARCODE cannot be found, leave the field empty but keep the ZPL lines intact.
+- IMPORTER_NAME and RUT must NEVER be empty (use defaults if needed).
 
 -------------------------------------
 OUTPUT FORMAT (STRICT)
 -------------------------------------
-Return ONLY a valid JSON object in this format:
+Return ONLY a valid JSON object in this exact format:
 
 {
   "description": "string",
