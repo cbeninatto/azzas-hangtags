@@ -47,23 +47,70 @@ OFFICIAL CHILE HANGTAG ZPL TEMPLATE
 -------------------------------------
 RULES
 -------------------------------------
+
+GENERAL
 - Replace ONLY the placeholders inside braces { }.
-- NEVER modify spacing, font sizes, alignment, or the structural layout of the template.
-- DESCRIPTION must be extracted and returned in uppercase as shown in the PDF.
-- SKU must be extracted and returned in uppercase.
-- BARCODE must be numeric digits only.
-- IMPORTER_NAME must always be present.
-    • If no importer name is found in the PDF, use: BAYONA SPA
-- RUT must always be present.
-    • If no RUT is found in the PDF, use: 80.582.900-1
-- Always fill IMPORTER_NAME and RUT with these defaults unless the PDF explicitly provides different values.
-- Never leave IMPORTER_NAME or RUT blank.
-- If other fields cannot be found, return them as an empty string but keep the line intact.
+- NEVER modify spacing, font sizes, alignment, borders, or the structural layout of the template.
+- All extracted fields must be cleaned and normalized before insertion into the ZPL.
 
 -------------------------------------
-OUTPUT FORMAT
+DESCRIPTION RULES
 -------------------------------------
-Return ONLY a valid JSON object:
+- The DESCRIPTION must be reconstructed by combining ALL product-description related lines from the PDF.
+- PDFs often break the product name across multiple lines. You MUST merge these lines into one complete product name.
+- Example:
+      NEUTRAL PEQUENA–PORTA
+      ECO LIGHT FLOATER–PRETO
+  Must become:
+      NEUTRAL PEQUENA / PORTA CARTÃO ECO LIGHT FLOATER – PRETO
+
+SPECIFIC RULES:
+- If the word “PORTA” appears alone (e.g., "NEUTRAL PEQUENA–PORTA"), expand it to “PORTA CARTÃO”.
+- Join multi-line descriptions using “ / ” when appropriate, or a space when natural.
+- Preserve dashes (–), accents, and exact words.
+- Remove line breaks and extra spaces.
+- Final DESCRIPTION must be uppercase.
+
+-------------------------------------
+SKU RULES
+-------------------------------------
+- The SKU you must extract is the SPACED format:
+      C 40008 0003 0001
+  (a “C” followed by three digit groups separated by spaces)
+- Many PDFs contain both:
+      C 40008 0003 0001 U C400080003AA
+  The correct SKU is ONLY:
+      C 40008 0003 0001
+- NEVER use compressed codes such as "C400080003AA". These are internal codes and must be ignored.
+- Preserve the original spacing exactly.
+
+-------------------------------------
+BARCODE RULES
+-------------------------------------
+- BARCODE must be digits only, with no spaces or hyphens.
+- If multiple barcodes appear, choose the 13-digit EAN/GTIN (e.g., 7900xxxxxxxxx).
+
+-------------------------------------
+IMPORTER & RUT RULES
+-------------------------------------
+- IMPORTER_NAME must ALWAYS be present and uppercase.
+  DEFAULT:
+      BAYONA SPA
+- RUT must ALWAYS be present.
+  DEFAULT:
+      80.582.900-1
+- Only replace these defaults if the PDF explicitly provides different importer data.
+
+-------------------------------------
+FALLBACK RULES
+-------------------------------------
+- If DESCRIPTION, SKU, or BARCODE truly cannot be found, return that field as an empty string but keep the ZPL lines intact.
+- IMPORTER_NAME and RUT must NEVER be empty (use defaults).
+
+-------------------------------------
+OUTPUT FORMAT (STRICT)
+-------------------------------------
+Return ONLY a valid JSON object in this format:
 
 {
   "description": "string",
@@ -74,5 +121,7 @@ Return ONLY a valid JSON object:
   "zpl": "string"
 }
 
-Do NOT return Markdown, comments, explanations, or any additional keys.
-Return ONLY the JSON.
+- NO Markdown.
+- NO commentary.
+- NO explanations.
+- ONLY valid JSON.
