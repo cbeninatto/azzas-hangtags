@@ -45,7 +45,7 @@ def base_name(filename):
 
 def convert_zpl(zpl_code, filetype="pdf"):
     """Use LabelZoom API to convert ZPL → PDF or PNG."""
-    url = f"https://api.labelzoom.net/api/convert/zpl/{filetype}"
+    url = f"https://api.labelzoom.net/convert/zpl/{filetype}"
 
     headers = {
         "Authorization": f"Bearer {st.secrets['LABELZOOM_API_KEY']}",
