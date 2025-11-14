@@ -22,7 +22,6 @@ SYSTEM_PROMPT = open("system_prompt.txt").read()
 # ---------------------------------
 
 def dedupe_text(raw_text):
-    """Remove duplicate lines while keeping original order."""
     seen = set()
     unique = []
     for line in raw_text.split("\n"):
@@ -33,15 +32,11 @@ def dedupe_text(raw_text):
     return "\n".join(unique)
 
 def base_name(filename):
-    """Return filename without .pdf extension."""
     if filename.lower().endswith(".pdf"):
         return filename[:-4]
     return filename
 
 def process_pdf(uploaded_file, progress):
-    """Extract PDF text, send to GPT, get structured fields + final ZPL."""
-    
-    # STEP 1 — Extract PDF
     progress.progress(10, text="Extracting PDF text...")
     with pdfplumber.open(uploaded_file) as pdf:
         text = ""
@@ -49,10 +44,10 @@ def process_pdf(uploaded_file, progress):
             page_text = page.extract_text()
             if page_text:
                 text += page_text + "\n"
+
     cleaned = dedupe_text(text)
     time.sleep(0.1)
 
-    # STEP 2 — Send to GPT
     progress.progress(50, text="Processing with GPT...")
     response = client.chat.completions.create(
         model="gpt-4.1",
@@ -64,18 +59,16 @@ def process_pdf(uploaded_file, progress):
 
     result_json = json.loads(response.choices[0].message.content)
 
-    # STEP 3 — Finalize
     progress.progress(100, text="Completed!")
     time.sleep(0.3)
 
     return cleaned, result_json
 
-
 # ---------------------------------
-# COPY BUTTON (JS — reliable in Streamlit Cloud)
+# COPY BUTTON (JS)
 # ---------------------------------
-def copy_button(label, text, key):
-    safe_text = text.replace("`", "'")  # Avoid JS injection breakage
+def copy_button_inline(label, text, key):
+    safe_text = text.replace("`", "'")
     button_html = f"""
         <script>
         function copyToClipboard_{key}() {{
@@ -89,10 +82,10 @@ def copy_button(label, text, key):
             border: 1px solid #ccc;
             cursor: pointer;
             font-size: 14px;
+            margin-top: 28px;
         ">{label}</button>
     """
     st.markdown(button_html, unsafe_allow_html=True)
-
 
 # ---------------------------------
 # FILE UPLOAD
@@ -105,25 +98,24 @@ uploaded_pdfs = st.file_uploader(
 
 if uploaded_pdfs:
 
-    # IMPORTANT: Do NOT wrap the loop in a container → prevents pagination
     for pdf_file in uploaded_pdfs:
 
         st.markdown("---")
 
-        # Progress bar
+        # Progress bar for this file
         progress = st.progress(0, text="Starting...")
 
-        # Extract → GPT → Output
         extracted_text, data = process_pdf(pdf_file, progress)
         zpl_code = data["zpl"]
         name_base = base_name(pdf_file.name)
 
         # ---------------------------------
-        # FILE HEADER + DOWNLOAD BUTTON
+        # FILE HEADER + BUTTONS (ALL IN ONE ROW)
         # ---------------------------------
-        cols = st.columns([4, 1])
+        cols = st.columns([4, 1, 1])
         cols[0].markdown(f"### 📄 {pdf_file.name}")
 
+        # DOWNLOAD ZPL BUTTON
         cols[1].download_button(
             label="⬇️ ZPL",
             data=zpl_code,
@@ -131,6 +123,10 @@ if uploaded_pdfs:
             mime="text/plain",
             key=f"dl_zpl_{pdf_file.name}"
         )
+
+        # COPY ZPL BUTTON — NOW NEXT TO FILENAME
+        with cols[2]:
+            copy_button_inline("📋 Copy", zpl_code, key=f"copy_{pdf_file.name}")
 
         # ---------------------------------
         # COLLAPSIBLE SECTIONS
@@ -144,10 +140,6 @@ if uploaded_pdfs:
 
         with st.expander("ZPL Output (click to expand)"):
             st.code(zpl_code, language="plaintext")
-
-            # Copy ZPL button (ONLY here)
-            copy_button("📋 Copy ZPL", zpl_code, key=f"copy_{pdf_file.name}")
-
 
 # ---------------------------------
 # FOOTER
