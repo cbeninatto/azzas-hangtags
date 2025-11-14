@@ -2,7 +2,8 @@ import streamlit as st
 import pdfplumber
 import json
 import time
-import streamlit.components.v1 as components
+import base64
+import requests
 from openai import OpenAI
 
 # ---------------------------------
@@ -10,7 +11,7 @@ from openai import OpenAI
 # ---------------------------------
 st.set_page_config(page_title="BAYONA SPA", layout="centered")
 st.title("BAYONA SPA")
-st.write("Upload one or multiple PDFs to extract metadata and generate ZPL hangtags automatically.")
+st.write("Upload one or multiple PDFs to extract metadata, generate ZPL hangtags and render PDF previews using LabelZoom.")
 
 # ---------------------------------
 # INIT OPENAI
@@ -40,7 +41,6 @@ def base_name(filename):
 
 
 def process_pdf(uploaded_file, progress):
-    # STEP 1 — Extract PDF text
     progress.progress(10, text="Extracting PDF text...")
     with pdfplumber.open(uploaded_file) as pdf:
         text = ""
@@ -52,7 +52,6 @@ def process_pdf(uploaded_file, progress):
     cleaned = dedupe_text(text)
     time.sleep(0.1)
 
-    # STEP 2 — GPT extraction
     progress.progress(50, text="Processing with GPT...")
     response = client.chat.completions.create(
         model="gpt-4.1",
@@ -64,7 +63,6 @@ def process_pdf(uploaded_file, progress):
 
     result_json = json.loads(response.choices[0].message.content)
 
-    # STEP 3 — Complete
     progress.progress(100, text="Completed!")
     time.sleep(0.3)
 
@@ -72,32 +70,62 @@ def process_pdf(uploaded_file, progress):
 
 
 # ---------------------------------
-# COPY BUTTON (SAFE INLINE BUTTON)
+# LABELZOOM PRIVATE API
 # ---------------------------------
+def convert_zpl_private(zpl_code, target="pdf"):
+    """Use LabelZoom PRIVATE API to convert ZPL → PDF or PNG."""
 
-def copy_button_inline(label, text, key):
-    safe_text = text.replace("`", "\\`")  # protect JS
+    url = f"https://prod-api.labelzoom.net/api/v2/convert/zpl/to/{target}"
+
+    headers = {
+        "Authorization": f"Bearer {st.secrets['LABELZOOM_PRIVATE_KEY']}",
+        "Content-Type": "text/plain",
+        "User-Agent": "BAYONA-SPA-Automation"
+    }
+
+    params = {
+        "dpi": 203,
+        "pdf": {"conversionMode": "IMAGE"},
+        "label": {"width": 4, "height": 6}
+    }
+
+    response = requests.post(
+        url,
+        headers=headers,
+        params={"params": json.dumps(params)},
+        data=zpl_code
+    )
+
+    if response.status_code == 200:
+        return response.content
+    else:
+        st.error(f"LabelZoom Error ({target.upper()}): {response.text}")
+        return None
+
+
+# ---------------------------------
+# PDF IFRAME PREVIEW (safe)
+# ---------------------------------
+def show_pdf_in_iframe(pdf_bytes):
+    base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
     html = f"""
-        <button onclick="navigator.clipboard.writeText(`{safe_text}`)"
-            style="
-                border-radius: 6px;
-                padding: 6px 14px;
-                background-color: #f0f0f0;
-                border: 1px solid #ccc;
-                cursor: pointer;
-                font-size: 14px;
-                margin-top: 28px;
-            ">
-            {label}
-        </button>
+        <iframe src="data:application/pdf;base64,{base64_pdf}"
+        width="100%" height="700" type="application/pdf"></iframe>
     """
-    components.html(html, height=40)
+    st.markdown(html, unsafe_allow_html=True)
+
+
+# ---------------------------------
+# COPY BUTTON HANDLER
+# ---------------------------------
+def copy_zpl(zpl_text, key):
+    st.session_state[f"copy_buffer_{key}"] = zpl_text
+    st.session_state[f"copy_trigger_{key}"] = True
 
 
 # ---------------------------------
 # FILE UPLOAD
 # ---------------------------------
-
 uploaded_pdfs = st.file_uploader(
     "Upload PDFs",
     type=["pdf"],
@@ -110,10 +138,8 @@ if uploaded_pdfs:
 
         st.markdown("---")
 
-        # Progress bar for each file
         progress = st.progress(0, text="Starting...")
 
-        # Extract text and process with GPT
         extracted_text, data = process_pdf(pdf_file, progress)
         zpl_code = data["zpl"]
         name_base = base_name(pdf_file.name)
@@ -124,7 +150,7 @@ if uploaded_pdfs:
         cols = st.columns([4, 1, 1])
         cols[0].markdown(f"### 📄 {pdf_file.name}")
 
-        # Download button
+        # Download ZPL
         cols[1].download_button(
             label="⬇️ ZPL",
             data=zpl_code,
@@ -133,14 +159,60 @@ if uploaded_pdfs:
             key=f"download_zpl_{pdf_file.name}"
         )
 
-        # Copy button inline next to download
-        with cols[2]:
-            copy_button_inline("📋 Copy", zpl_code, key=f"copy_{pdf_file.name}")
+        # Copy ZPL
+        cols[2].button(
+            "📋 Copy",
+            on_click=copy_zpl,
+            args=(zpl_code, pdf_file.name),
+            key=f"copy_btn_{pdf_file.name}"
+        )
+
+        # Streamlit clipboard handler
+        if st.session_state.get(f"copy_trigger_{pdf_file.name}", False):
+            st.text_input(
+                "hidden_copy_target",
+                st.session_state[f"copy_buffer_{pdf_file.name}"],
+                key=f"hidden_copy_box_{pdf_file.name}"
+            )
+            st.success("Copied to clipboard!")
+            st.session_state[f"copy_trigger_{pdf_file.name}"] = False
 
         # ---------------------------------
-        # COLLAPSIBLE DATA SECTIONS
+        # LABELZOOM PDF + PNG RENDERING
         # ---------------------------------
 
+        with st.expander("Label Preview (PDF/PNG)"):
+            st.write("Rendering via LabelZoom...")
+
+            # Generate PDF preview
+            pdf_render = convert_zpl_private(zpl_code, "pdf")
+            if pdf_render:
+                st.download_button(
+                    "⬇️ Download PDF Preview",
+                    data=pdf_render,
+                    file_name=f"{name_base}_preview.pdf",
+                    mime="application/pdf",
+                    key=f"download_pdf_{pdf_file.name}"
+                )
+
+                # Show inline preview
+                show_pdf_in_iframe(pdf_render)
+
+            # Generate PNG preview
+            png_render = convert_zpl_private(zpl_code, "png")
+            if png_render:
+                st.image(png_render, caption="PNG Preview")
+                st.download_button(
+                    "⬇️ Download PNG",
+                    data=png_render,
+                    file_name=f"{name_base}.png",
+                    mime="image/png",
+                    key=f"download_png_{pdf_file.name}"
+                )
+
+        # ---------------------------------
+        # COLLAPSIBLE EXTRACTION DATA
+        # ---------------------------------
         with st.expander("Extracted Fields (click to expand)"):
             st.json(data)
 
