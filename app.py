@@ -148,7 +148,6 @@ def process_pdf_bytes(
         sku = extract_sku(label_text)
 
         if not sku:
-            # No recognizable SKU in this label
             continue
 
         if sku in seen_skus:
@@ -156,10 +155,8 @@ def process_pdf_bytes(
 
         seen_skus.add(sku)
 
-        # Build output filename using the original PDF name + SKU
         out_name = f"{base_name} - {sku}.pdf"
 
-        # Create a new 1-page PDF with just this cropped label
         new_doc = fitz.open()
         new_page = new_doc.new_page(
             width=clip_rect.width,
@@ -185,7 +182,8 @@ def process_pdf_bytes(
 st.set_page_config(page_title="Chile Label Extractor", page_icon="🏷️")
 
 st.title("🏷️ Chile Label Extractor – One PDF per SKU")
-st.write(
+
+st.markdown(
     """
 Upload one or more **multi-page PDFs** with label sheets.
 
@@ -195,7 +193,7 @@ For each PDF, this app will:
 - Look at the **leftmost label** on each page
 - Extract the SKU in the format `C40008 0003 0002`
 - Keep **only one label per SKU**
-- Output a set of cropped PDFs named like:
+- Output cropped PDFs named like:
 
 `HANGTAG BARCODE CHILE - C40008 0003 0002.pdf`
 """
@@ -213,7 +211,7 @@ padding_y = st.number_input("Vertical padding (px)", min_value=0, value=8, step=
 
 if uploaded_files and st.button("Process PDFs"):
     all_outputs: List[Tuple[str, bytes]] = []
-    sku_list = []
+    sku_log = []
 
     for f in uploaded_files:
         st.write(f"**Processing:** {f.name}")
@@ -228,12 +226,11 @@ if uploaded_files and st.button("Process PDFs"):
         all_outputs.extend(outputs)
         for name, _ in outputs:
             sku_part = name.split(" - ", 1)[-1].replace(".pdf", "")
-            sku_list.append((f.name, sku_part))
+            sku_log.append((f.name, sku_part))
 
     if not all_outputs:
         st.warning("No labels with recognizable SKUs were found.")
     else:
-        # Create ZIP in memory
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             for filename, pdf_bytes in all_outputs:
@@ -249,8 +246,7 @@ if uploaded_files and st.button("Process PDFs"):
             mime="application/zip",
         )
 
-        # Optional: show table of SKUs
-        if sku_list:
+        if sku_log:
             st.subheader("SKUs found")
-            for original, sku in sku_list:
+            for original, sku in sku_log:
                 st.write(f"- **{original}** → `{sku}`")
