@@ -114,12 +114,15 @@ def process_pdf_bytes(
     cols: int = 3,
     padding_x: int = 5,
     padding_y: int = 8,
+    copies_per_sku: int = 1,
 ) -> List[Tuple[str, bytes]]:
     """
     Process a single PDF (in-memory bytes).
 
     Returns a list of (output_filename, pdf_bytes) for each UNIQUE SKU
     found in the leftmost label across all pages.
+
+    Each output PDF contains `copies_per_sku` identical pages.
     """
     outputs: List[Tuple[str, bytes]] = []
 
@@ -157,17 +160,20 @@ def process_pdf_bytes(
 
         out_name = f"{base_name} - {sku}.pdf"
 
+        # Create a new PDF with N identical pages of the same clipped label
         new_doc = fitz.open()
-        new_page = new_doc.new_page(
-            width=clip_rect.width,
-            height=clip_rect.height,
-        )
-        new_page.show_pdf_page(
-            new_page.rect,
-            doc,
-            page_index,
-            clip=clip_rect,
-        )
+        for _ in range(max(1, copies_per_sku)):
+            new_page = new_doc.new_page(
+                width=clip_rect.width,
+                height=clip_rect.height,
+            )
+            new_page.show_pdf_page(
+                new_page.rect,
+                doc,
+                page_index,
+                clip=clip_rect,
+            )
+
         pdf_bytes = new_doc.tobytes()
         new_doc.close()
 
@@ -209,6 +215,14 @@ cols = st.number_input("Labels across per page (columns)", min_value=1, value=3,
 padding_x = st.number_input("Horizontal padding (px)", min_value=0, value=5, step=1)
 padding_y = st.number_input("Vertical padding (px)", min_value=0, value=8, step=1)
 
+copies_per_sku = st.number_input(
+    "Pages per label PDF (duplicates)",
+    min_value=1,
+    value=1,
+    step=1,
+    help="Each output PDF will contain this many identical pages of the same label.",
+)
+
 if uploaded_files and st.button("Process PDFs"):
     all_outputs: List[Tuple[str, bytes]] = []
     sku_log = []
@@ -222,6 +236,7 @@ if uploaded_files and st.button("Process PDFs"):
             cols=int(cols),
             padding_x=int(padding_x),
             padding_y=int(padding_y),
+            copies_per_sku=int(copies_per_sku),
         )
         all_outputs.extend(outputs)
         for name, _ in outputs:
