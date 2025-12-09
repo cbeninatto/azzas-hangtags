@@ -1,12 +1,14 @@
 import io
 import re
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Dict
 
 import fitz  # PyMuPDF
 import streamlit as st
 import zipfile
 
+
+# ---------- Core PDF helpers ----------
 
 def compute_first_label_clip(page, cols=3, padding_x=5, padding_y=8):
     """
@@ -114,28 +116,25 @@ def process_pdf_bytes(
     cols: int = 3,
     padding_x: int = 5,
     padding_y: int = 8,
-    copies_per_sku: int = 1,
-) -> List[Tuple[str, bytes]]:
+) -> List[Dict]:
     """
     Process a single PDF (in-memory bytes).
 
-    Returns a list of (output_filename, pdf_bytes) for each UNIQUE SKU
-    found in the leftmost label across all pages.
-
-    Each output PDF contains `copies_per_sku` identical pages.
+    Returns a list of dicts for each UNIQUE SKU found in the leftmost label across all pages.
+    Each dict contains the single-page cropped PDF bytes and metadata.
     """
-    outputs: List[Tuple[str, bytes]] = []
+    results: List[Dict] = []
 
     try:
         doc = fitz.open(stream=file_bytes, filetype="pdf")
     except Exception as e:
         st.error(f"Error opening {original_name}: {e}")
-        return outputs
+        return results
 
     if len(doc) == 0:
         st.warning(f"{original_name}: no pages.")
         doc.close()
-        return outputs
+        return results
 
     base_name = Path(original_name).stem
     seen_skus = set()
@@ -154,36 +153,42 @@ def process_pdf_bytes(
             continue
 
         if sku in seen_skus:
-            continue  # already processed this SKU
+            continue  # already processed this SKU from this file
 
         seen_skus.add(sku)
 
         out_name = f"{base_name} - {sku}.pdf"
 
-        # Create a new PDF with N identical pages of the same clipped label
+        # Create a 1-page PDF with the cropped label
         new_doc = fitz.open()
-        for _ in range(max(1, copies_per_sku)):
-            new_page = new_doc.new_page(
-                width=clip_rect.width,
-                height=clip_rect.height,
-            )
-            new_page.show_pdf_page(
-                new_page.rect,
-                doc,
-                page_index,
-                clip=clip_rect,
-            )
-
+        new_page = new_doc.new_page(
+            width=clip_rect.width,
+            height=clip_rect.height,
+        )
+        new_page.show_pdf_page(
+            new_page.rect,
+            doc,
+            page_index,
+            clip=clip_rect,
+        )
         pdf_bytes = new_doc.tobytes()
         new_doc.close()
 
-        outputs.append((out_name, pdf_bytes))
+        results.append(
+            {
+                "output_name": out_name,
+                "base_name": base_name,
+                "original_name": original_name,
+                "sku": sku,
+                "pdf_bytes": pdf_bytes,  # single-page PDF
+            }
+        )
 
     doc.close()
-    return outputs
+    return results
 
 
-# -------- Streamlit UI --------
+# ---------- Streamlit UI ----------
 
 st.set_page_config(page_title="Chile Label Extractor", page_icon="🏷️")
 
@@ -191,17 +196,21 @@ st.title("🏷️ Chile Label Extractor – One PDF per SKU")
 
 st.markdown(
     """
+### Step 1 – Upload & process
+
 Upload one or more **multi-page PDFs** with label sheets.
 
 For each PDF, this app will:
 
-- Scan all pages
-- Look at the **leftmost label** on each page
-- Extract the SKU in the format `C40008 0003 0002`
-- Keep **only one label per SKU**
-- Output cropped PDFs named like:
+- Scan all pages  
+- Look at the **leftmost label** on each page  
+- Extract the SKU in the format `C40008 0003 0002`  
+- Keep **only one label per SKU**  
+- Create an internal single-page PDF named like:
 
 `HANGTAG BARCODE CHILE - C40008 0003 0002.pdf`
+
+Then, in **Step 2**, you can choose how many pages each label PDF should have.
 """
 )
 
@@ -215,53 +224,101 @@ cols = st.number_input("Labels across per page (columns)", min_value=1, value=3,
 padding_x = st.number_input("Horizontal padding (px)", min_value=0, value=5, step=1)
 padding_y = st.number_input("Vertical padding (px)", min_value=0, value=8, step=1)
 
-copies_per_sku = st.number_input(
-    "Pages per label PDF (duplicates)",
-    min_value=1,
-    value=1,
-    step=1,
-    help="Each output PDF will contain this many identical pages of the same label.",
-)
+# Initialize session state store for processed labels
+if "processed_labels" not in st.session_state:
+    st.session_state["processed_labels"] = []
 
-if uploaded_files and st.button("Process PDFs"):
-    all_outputs: List[Tuple[str, bytes]] = []
-    sku_log = []
 
-    for f in uploaded_files:
-        st.write(f"**Processing:** {f.name}")
-        file_bytes = f.read()
-        outputs = process_pdf_bytes(
-            file_bytes,
-            f.name,
-            cols=int(cols),
-            padding_x=int(padding_x),
-            padding_y=int(padding_y),
-            copies_per_sku=int(copies_per_sku),
-        )
-        all_outputs.extend(outputs)
-        for name, _ in outputs:
-            sku_part = name.split(" - ", 1)[-1].replace(".pdf", "")
-            sku_log.append((f.name, sku_part))
+# ---- Step 1: Process PDFs ----
 
-    if not all_outputs:
-        st.warning("No labels with recognizable SKUs were found.")
+if st.button("✅ Process PDFs (step 1)"):
+    if not uploaded_files:
+        st.warning("Please upload at least one PDF first.")
     else:
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for filename, pdf_bytes in all_outputs:
-                zf.writestr(filename, pdf_bytes)
-        zip_buffer.seek(0)
+        all_labels: List[Dict] = []
+        for f in uploaded_files:
+            st.write(f"**Processing:** {f.name}")
+            file_bytes = f.read()
+            labels = process_pdf_bytes(
+                file_bytes,
+                f.name,
+                cols=int(cols),
+                padding_x=int(padding_x),
+                padding_y=int(padding_y),
+            )
+            all_labels.extend(labels)
 
-        st.success(f"Done! Generated {len(all_outputs)} label PDFs.")
+        st.session_state["processed_labels"] = all_labels
 
-        st.download_button(
-            label="⬇️ Download all labels as ZIP",
-            data=zip_buffer.getvalue(),
-            file_name="labels_by_sku.zip",
-            mime="application/zip",
-        )
+        if not all_labels:
+            st.warning("No labels with recognizable SKUs were found.")
+        else:
+            st.success(f"Found {len(all_labels)} unique labels (by SKU). See Step 2 below.")
 
-        if sku_log:
-            st.subheader("SKUs found")
-            for original, sku in sku_log:
-                st.write(f"- **{original}** → `{sku}`")
+
+processed_labels = st.session_state.get("processed_labels", [])
+
+# ---- Step 2: Per-label duplication & ZIP download ----
+
+if processed_labels:
+    st.markdown("---")
+    st.subheader("Step 2 – Choose pages per label and download")
+
+    st.markdown(
+        "For each label SKU below, set how many **pages** you want in the final PDF."
+    )
+
+    # Show per-label controls
+    for i, item in enumerate(processed_labels):
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            st.markdown(
+                f"- **{item['output_name']}**  "
+                f"(source: `{item['original_name']}`, SKU: `{item['sku']}`)"
+            )
+        with col2:
+            # Each SKU gets its own pages control
+            key = f"copies_{i}"
+            default_value = st.session_state.get(key, 1)
+            st.number_input(
+                "Pages",
+                min_value=1,
+                max_value=999,
+                value=default_value,
+                step=1,
+                key=key,
+            )
+
+    # Build ZIP using current page settings
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, item in enumerate(processed_labels):
+            copies = int(st.session_state.get(f"copies_{i}", 1))
+
+            # Open the single-page PDF
+            base_pdf = fitz.open(stream=item["pdf_bytes"], filetype="pdf")
+            src_page = base_pdf[0]
+            rect = src_page.rect
+
+            # Build a new PDF with `copies` pages
+            new_doc = fitz.open()
+            for _ in range(max(1, copies)):
+                new_page = new_doc.new_page(width=rect.width, height=rect.height)
+                new_page.show_pdf_page(new_page.rect, base_pdf, 0)
+
+            pdf_bytes_multi = new_doc.tobytes()
+            new_doc.close()
+            base_pdf.close()
+
+            zf.writestr(item["output_name"], pdf_bytes_multi)
+
+    zip_buffer.seek(0)
+
+    st.download_button(
+        label="⬇️ Download labels as ZIP (step 2)",
+        data=zip_buffer.getvalue(),
+        file_name="labels_by_sku.zip",
+        mime="application/zip",
+    )
+else:
+    st.info("Upload PDFs and click **Process PDFs (step 1)** to start.")
