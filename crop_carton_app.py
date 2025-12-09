@@ -38,13 +38,13 @@ def detect_crop_rect(
     target_ratio: float = TARGET_RATIO,
     zoom: float = 2.0,
     threshold: int = 250,
+    margin_pct: float = 0.08,
 ):
     """
-    Detect a crop rectangle on the first page based on non-white content.
+    Detect a crop rectangle on the first page based on non-white content
+    and add an extra margin around it.
 
-    Returns:
-        crop_rect_pdf (fitz.Rect): rectangle in PDF coordinates
-        preview (PIL.Image): 680x480 preview image of the cropped area
+    margin_pct: fraction of width/height to add on each side (e.g. 0.08 = 8%)
     """
     page = doc[0]
     matrix = fitz.Matrix(zoom, zoom)
@@ -65,7 +65,25 @@ def detect_crop_rect(
 
     min_x, max_x = xs.min(), xs.max()
     min_y, max_y = ys.min(), ys.max()
+
     x0, y0, x1, y1 = float(min_x), float(min_y), float(max_x), float(max_y)
+    width = x1 - x0
+    height = y1 - y0
+
+    # ---- NEW: add margin around detected box ----
+    margin_x = width * margin_pct
+    margin_y = height * margin_pct
+    x0 -= margin_x
+    x1 += margin_x
+    y0 -= margin_y
+    y1 += margin_y
+
+    # Clamp to image bounds
+    x0 = max(0, x0)
+    y0 = max(0, y0)
+    x1 = min(pix.width, x1)
+    y1 = min(pix.height, y1)
+
     width = x1 - x0
     height = y1 - y0
 
@@ -84,7 +102,7 @@ def detect_crop_rect(
         x0 = center_x - new_width / 2
         x1 = center_x + new_width / 2
 
-    # Clamp to image bounds
+    # Clamp again
     x0 = max(0, x0)
     y0 = max(0, y0)
     x1 = min(pix.width, x1)
@@ -165,6 +183,15 @@ Upload the consolidated **picking PDF** and this app will:
         """
     )
 
+    # Sidebar: margin control
+    margin_pct_ui = st.sidebar.slider(
+        "Extra margin around detection (%)",
+        min_value=0,
+        max_value=30,
+        value=8,
+        step=1,
+    ) / 100.0
+
     uploaded = st.file_uploader("Upload PDF", type=["pdf"])
 
     if not uploaded:
@@ -181,7 +208,7 @@ Upload the consolidated **picking PDF** and this app will:
     st.success(f"Loaded PDF with {len(doc)} page(s).")
 
     with st.spinner("Detecting crop area from first page..."):
-        crop_rect, preview = detect_crop_rect(doc)
+        crop_rect, preview = detect_crop_rect(doc, margin_pct=margin_pct_ui)
 
     st.subheader("Crop preview (680 × 480 px)")
     st.image(
