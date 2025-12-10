@@ -96,11 +96,11 @@ def compute_first_label_clip(page, cols=3, padding_x=5, padding_y=8):
 
 def extract_sku(label_text: str) -> Optional[str]:
     """
-    Extracts a SKU like 'C40008 0003 0002' from the label text.
+    Extracts a SKU like 'C50039 0007 0001' or 'C40008 0003 0002' from the label text.
 
     Handles both:
-      - 'C40008 0003 0002'
-      - 'C 40008 0003 0002'
+      - 'C50039 0007 0001'
+      - 'C 50039 0007 0001'
     """
     normalized = " ".join(label_text.split())
     pattern = r"([A-Z])\s?(\d{5})\s+(\d{4})\s+(\d{4})"
@@ -116,12 +116,18 @@ def process_pdf_bytes(
     cols: int = 3,
     padding_x: int = 5,
     padding_y: int = 8,
-) -> List[Dict]:
+    ref_size: Optional[Dict[str, float]] = None,
+) -> (List[Dict], Dict[str, float]):
     """
     Process a single PDF (in-memory bytes).
 
-    Returns a list of dicts for each UNIQUE SKU found in the leftmost label across all pages.
-    Each dict contains the single-page cropped PDF bytes and metadata.
+    Returns:
+      - list of dicts for each UNIQUE SKU found in the leftmost label.
+        Each dict contains a SINGLE-PAGE cropped PDF bytes and metadata.
+      - updated ref_size dict with 'width' and 'height' for the canonical label size.
+
+    The first label processed (overall, across uploads) defines the reference
+    width & height. All other labels are scaled to that same page size.
     """
     results: List[Dict] = []
 
@@ -129,15 +135,18 @@ def process_pdf_bytes(
         doc = fitz.open(stream=file_bytes, filetype="pdf")
     except Exception as e:
         st.error(f"Error opening {original_name}: {e}")
-        return results
+        return results, ref_size or {}
 
     if len(doc) == 0:
         st.warning(f"{original_name}: no pages.")
         doc.close()
-        return results
+        return results, ref_size or {}
 
-    base_name = Path(original_name).stem
     seen_skus = set()
+
+    # Initialize reference size if not already set
+    if ref_size is None:
+        ref_size = {}
 
     for page_index in range(len(doc)):
         page = doc[page_index]
@@ -157,14 +166,25 @@ def process_pdf_bytes(
 
         seen_skus.add(sku)
 
-        out_name = f"{base_name} - {sku}.pdf"
+        # ---- Define / use reference page size ----
+        if "width" not in ref_size or "height" not in ref_size:
+            # First label defines the canonical label size
+            ref_size["width"] = clip_rect.width
+            ref_size["height"] = clip_rect.height
 
-        # Create a 1-page PDF with the cropped label
+        target_width = ref_size["width"]
+        target_height = ref_size["height"]
+
+        # ---- Build filename: CHILE BARCODE HANGTAG <SKU>.pdf ----
+        out_name = f"CHILE BARCODE HANGTAG {sku}.pdf"
+
+        # Create a 1-page PDF with the cropped label, scaled to reference size
         new_doc = fitz.open()
         new_page = new_doc.new_page(
-            width=clip_rect.width,
-            height=clip_rect.height,
+            width=target_width,
+            height=target_height,
         )
+        # Show the clip scaled into the full new_page.rect
         new_page.show_pdf_page(
             new_page.rect,
             doc,
@@ -177,15 +197,14 @@ def process_pdf_bytes(
         results.append(
             {
                 "output_name": out_name,
-                "base_name": base_name,
                 "original_name": original_name,
                 "sku": sku,
-                "pdf_bytes": pdf_bytes,  # single-page PDF
+                "pdf_bytes": pdf_bytes,  # single-page PDF at reference size
             }
         )
 
     doc.close()
-    return results
+    return results, ref_size
 
 
 # ---------- Streamlit UI ----------
@@ -204,13 +223,14 @@ For each PDF, this app will:
 
 - Scan all pages  
 - Look at the **leftmost label** on each page  
-- Extract the SKU in the format `C40008 0003 0002`  
+- Extract the SKU in the format `C50039 0007 0001`  
 - Keep **only one label per SKU**  
-- Create an internal single-page PDF named like:
+- Create a single-page PDF named:
 
-`HANGTAG BARCODE CHILE - C40008 0003 0002.pdf`
+`CHILE BARCODE HANGTAG C50039 0007 0001.pdf`
 
-Then, in **Step 2**, you can choose how many pages each label PDF should have.
+The **first label** processed defines the reference width and height.
+All other labels are scaled to that same page size.
 """
 )
 
@@ -224,10 +244,12 @@ cols = st.number_input("Labels across per page (columns)", min_value=1, value=3,
 padding_x = st.number_input("Horizontal padding (px)", min_value=0, value=5, step=1)
 padding_y = st.number_input("Vertical padding (px)", min_value=0, value=8, step=1)
 
-# Initialize session state store for processed labels
+# Initialize session state store for processed labels and reference size
 if "processed_labels" not in st.session_state:
     st.session_state["processed_labels"] = []
 
+if "ref_size" not in st.session_state:
+    st.session_state["ref_size"] = {}
 
 # ---- Step 1: Process PDFs ----
 
@@ -236,24 +258,36 @@ if st.button("✅ Process PDFs (step 1)"):
         st.warning("Please upload at least one PDF first.")
     else:
         all_labels: List[Dict] = []
+        ref_size = st.session_state.get("ref_size", {})
+
         for f in uploaded_files:
             st.write(f"**Processing:** {f.name}")
             file_bytes = f.read()
-            labels = process_pdf_bytes(
+            labels, ref_size = process_pdf_bytes(
                 file_bytes,
                 f.name,
                 cols=int(cols),
                 padding_x=int(padding_x),
                 padding_y=int(padding_y),
+                ref_size=ref_size,
             )
             all_labels.extend(labels)
 
         st.session_state["processed_labels"] = all_labels
+        st.session_state["ref_size"] = ref_size
 
         if not all_labels:
             st.warning("No labels with recognizable SKUs were found.")
         else:
-            st.success(f"Found {len(all_labels)} unique labels (by SKU). See Step 2 below.")
+            w = ref_size.get("width", None)
+            h = ref_size.get("height", None)
+            if w and h:
+                st.success(
+                    f"Found {len(all_labels)} unique labels (by SKU). "
+                    f"Reference label size: {w:.2f} × {h:.2f} points."
+                )
+            else:
+                st.success(f"Found {len(all_labels)} unique labels (by SKU).")
 
 
 processed_labels = st.session_state.get("processed_labels", [])
@@ -277,7 +311,6 @@ if processed_labels:
                 f"(source: `{item['original_name']}`, SKU: `{item['sku']}`)"
             )
         with col2:
-            # Each SKU gets its own pages control
             key = f"copies_{i}"
             default_value = st.session_state.get(key, 1)
             st.number_input(
@@ -295,12 +328,12 @@ if processed_labels:
         for i, item in enumerate(processed_labels):
             copies = int(st.session_state.get(f"copies_{i}", 1))
 
-            # Open the single-page PDF
+            # Open the single-page (already standardized size) PDF
             base_pdf = fitz.open(stream=item["pdf_bytes"], filetype="pdf")
             src_page = base_pdf[0]
             rect = src_page.rect
 
-            # Build a new PDF with `copies` pages
+            # Build a new PDF with `copies` identical pages
             new_doc = fitz.open()
             for _ in range(max(1, copies)):
                 new_page = new_doc.new_page(width=rect.width, height=rect.height)
