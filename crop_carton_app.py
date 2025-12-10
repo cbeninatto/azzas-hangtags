@@ -1,261 +1,357 @@
+import io
 import re
-from io import BytesIO
-
-import numpy as np
-from PIL import Image
+from pathlib import Path
+from typing import Optional, List, Dict
 
 import fitz  # PyMuPDF
 import streamlit as st
 import zipfile
 
 
-TARGET_WIDTH = 680
-TARGET_HEIGHT = 480
-TARGET_RATIO = TARGET_WIDTH / TARGET_HEIGHT
+# ---------- Core PDF helpers ----------
 
-
-def extract_reference(text: str) -> str:
-    """Extract REFERENCIA code like C400080003XX from page text."""
-    match = re.search(r"REFERENCIA:\s*([A-Z0-9]+)", text)
-    if match:
-        return match.group(1)
-    return "UNKNOWN"
-
-
-def extract_groups(doc):
-    """Return dict mapping REFERENCIA -> list of page indices."""
-    groups = {}
-    for i in range(len(doc)):
-        page = doc[i]
-        text = page.get_text()
-        ref = extract_reference(text)
-        groups.setdefault(ref, []).append(i)
-    return groups
-
-
-def detect_crop_rect(
-    doc,
-    target_ratio: float = TARGET_RATIO,
-    zoom: float = 2.0,
-    threshold: int = 250,
-    margin_pct: float = 0.08,
-):
+def compute_first_label_clip(page, cols=3, padding_x=5, padding_y=8):
     """
-    Detect a crop rectangle on the first page based on non-white content
-    and add an extra margin around it.
+    Finds the FIRST (leftmost) label on a page that has `cols` labels across (3).
 
-    margin_pct: fraction of width/height to add on each side (e.g. 0.08 = 8%)
+    - Uses the x-centers of text blocks to cluster into `cols` columns.
+    - Only keeps the leftmost cluster (column 1).
+    - Builds a tight bounding box around that column's text.
+    - Adds the same padding on left and right (padding_x) and on top/bottom (padding_y).
     """
-    page = doc[0]
-    matrix = fitz.Matrix(zoom, zoom)
-    pix = page.get_pixmap(matrix=matrix, alpha=False)
-
-    # Build PIL image from pixmap
-    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-    gray = img.convert("L")
-    arr = np.array(gray)
-
-    # Find all non-white pixels
-    mask = arr < threshold
-    ys, xs = np.where(mask)
-    if xs.size == 0 or ys.size == 0:
-        # Fallback: no content detected, use the whole page
-        preview = img.resize((TARGET_WIDTH, TARGET_HEIGHT), Image.LANCZOS)
-        return page.rect, preview
-
-    min_x, max_x = xs.min(), xs.max()
-    min_y, max_y = ys.min(), ys.max()
-
-    x0, y0, x1, y1 = float(min_x), float(min_y), float(max_x), float(max_y)
-    width = x1 - x0
-    height = y1 - y0
-
-    # ---- NEW: add margin around detected box ----
-    margin_x = width * margin_pct
-    margin_y = height * margin_pct
-    x0 -= margin_x
-    x1 += margin_x
-    y0 -= margin_y
-    y1 += margin_y
-
-    # Clamp to image bounds
-    x0 = max(0, x0)
-    y0 = max(0, y0)
-    x1 = min(pix.width, x1)
-    y1 = min(pix.height, y1)
-
-    width = x1 - x0
-    height = y1 - y0
-
-    # Adjust to desired aspect ratio by expanding the box
-    current_ratio = width / height
-    if current_ratio > target_ratio:
-        # Too wide: increase height
-        new_height = width / target_ratio
-        center_y = (y0 + y1) / 2
-        y0 = center_y - new_height / 2
-        y1 = center_y + new_height / 2
-    else:
-        # Too tall: increase width
-        new_width = height * target_ratio
-        center_x = (x0 + x1) / 2
-        x0 = center_x - new_width / 2
-        x1 = center_x + new_width / 2
-
-    # Clamp again
-    x0 = max(0, x0)
-    y0 = max(0, y0)
-    x1 = min(pix.width, x1)
-    y1 = min(pix.height, y1)
-
-    # Create preview image at 680x480
-    crop_box_px = (int(round(x0)), int(round(y0)),
-                   int(round(x1)), int(round(y1)))
-    cropped = img.crop(crop_box_px)
-    preview = cropped.resize((TARGET_WIDTH, TARGET_HEIGHT), Image.LANCZOS)
-
-    # Convert pixel rect to PDF coordinates
     page_rect = page.rect
-    scale_x = page_rect.width / pix.width
-    scale_y = page_rect.height / pix.height
-    crop_rect_pdf = fitz.Rect(
-        x0 * scale_x,
-        y0 * scale_y,
-        x1 * scale_x,
-        y1 * scale_y,
-    )
+    blocks = page.get_text("blocks")  # (x0, y0, x1, y1, text, ...)
 
-    return crop_rect_pdf, preview
+    xs = []
+    block_data = []
+    for b in blocks:
+        if len(b) < 5:
+            continue
+        x0, y0, x1, y1, text = b[0], b[1], b[2], b[3], b[4]
+        if not str(text).strip():
+            continue
+
+        cx = (x0 + x1) / 2.0  # center x of this block
+        xs.append(cx)
+        block_data.append((cx, x0, y0, x1, y1))
+
+    # Fallback: if we somehow find no text
+    if not xs:
+        label_width = page_rect.width / cols
+        return fitz.Rect(0, 0, label_width, page_rect.height)
+
+    # --- 1D k-means on x-centers, initialized from the data range (not page width) ---
+    k = cols
+    minx, maxx = min(xs), max(xs)
+
+    if k == 1 or maxx == minx:
+        centers = [(minx + maxx) / 2.0]
+        assignments = [0] * len(xs)
+    else:
+        spacing = (maxx - minx) / (k - 1)
+        centers = [minx + i * spacing for i in range(k)]
+        assignments = [0] * len(xs)
+
+        for _ in range(10):
+            # assign
+            for i, x in enumerate(xs):
+                assignments[i] = min(range(k), key=lambda j: abs(x - centers[j]))
+            # recompute centers
+            new_centers = centers[:]
+            for j in range(k):
+                members = [xs[i] for i, a in enumerate(assignments) if a == j]
+                if members:
+                    new_centers[j] = sum(members) / len(members)
+            centers = new_centers
+
+    # Group blocks per column
+    col_blocks = {j: [] for j in range(len(centers))}
+    for i, (cx, x0, y0, x1, y1) in enumerate(block_data):
+        j = assignments[i]
+        col_blocks[j].append((x0, y0, x1, y1))
+
+    # Leftmost column = smallest center value
+    sorted_indices = sorted(range(len(centers)), key=lambda j: centers[j])
+    first_idx = sorted_indices[0]
+    first_blocks = col_blocks.get(first_idx, [])
+
+    # Fallback in weird cases
+    if not first_blocks:
+        label_width = page_rect.width / cols
+        return fitz.Rect(0, 0, label_width, page_rect.height)
+
+    # Tight bounding box of the first column's text
+    xs0 = [b[0] for b in first_blocks]
+    ys0 = [b[1] for b in first_blocks]
+    xs1 = [b[2] for b in first_blocks]
+    ys1 = [b[3] for b in first_blocks]
+
+    min_x = max(0, min(xs0) - padding_x)
+    max_x = min(page_rect.width, max(xs1) + padding_x)
+    min_y = max(0, min(ys0) - padding_y)
+    max_y = min(page_rect.height, max(ys1) + padding_y)
+
+    return fitz.Rect(min_x, min_y, max_x, max_y)
 
 
-def build_group_pdfs(doc, groups, crop_rect):
-    """Create one cropped PDF per REFERENCIA.
+def extract_sku(label_text: str) -> Optional[str]:
+    """
+    Extracts a SKU like 'C50039 0007 0001' or 'C40008 0003 0002' from the label text.
+
+    Handles both:
+      - 'C50039 0007 0001'
+      - 'C 50039 0007 0001'
+    """
+    normalized = " ".join(label_text.split())
+    pattern = r"([A-Z])\s?(\d{5})\s+(\d{4})\s+(\d{4})"
+    m = re.search(pattern, normalized)
+    if not m:
+        return None
+    return f"{m.group(1)}{m.group(2)} {m.group(3)} {m.group(4)}"
+
+
+def process_pdf_bytes(
+    file_bytes: bytes,
+    original_name: str,
+    cols: int = 3,
+    padding_x: int = 5,
+    padding_y: int = 8,
+    ref_size: Optional[Dict[str, float]] = None,
+) -> (List[Dict], Dict[str, float]):
+    """
+    Process a single PDF (in-memory bytes).
 
     Returns:
-        dict[str, tuple[str, BytesIO]] mapping ref -> (filename, buffer)
+      - list of dicts for each UNIQUE SKU found in the leftmost label.
+        Each dict contains a SINGLE-PAGE cropped PDF bytes and metadata.
+      - updated ref_size dict with 'width' and 'height' for the canonical label size.
+
+    The first label processed (overall, across uploads) defines the reference
+    width & height. All other labels are scaled to that same page size.
     """
-    outputs = {}
-    for ref, page_indices in groups.items():
-        out_doc = fitz.open()
-        for idx in page_indices:
-            out_doc.insert_pdf(doc, from_page=idx, to_page=idx)
-            page = out_doc[-1]
-            page.set_cropbox(crop_rect)
-
-        buffer = BytesIO()
-        out_doc.save(buffer)
-        out_doc.close()
-        buffer.seek(0)
-
-        filename = f"CARTON BARCODE - {ref}.pdf"
-        outputs[ref] = (filename, buffer)
-
-    return outputs
-
-
-def build_zip(outputs):
-    """Pack all generated PDFs into a single ZIP buffer."""
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w") as zf:
-        for filename, buf in outputs.values():
-            zf.writestr(filename, buf.getvalue())
-    zip_buffer.seek(0)
-    return zip_buffer
-
-
-def main():
-    st.set_page_config(
-        page_title="Carton Barcode Cropper",
-        page_icon="📦",
-        layout="centered",
-    )
-    st.title("📦 Carton Barcode Cropper")
-
-    st.markdown(
-        """\
-Upload the consolidated **picking PDF** and this app will:
-
-1. Detect the label area on the first page and crop every page to that region
-   (output aspect ratio ≈ **680 × 480 px**).
-2. Group pages by **REFERENCIA** (e.g. `C400080003XX`).
-3. Generate one PDF per REFERENCIA with filenames like  
-   `CARTON BARCODE - C400080003XX.pdf`.
-        """
-    )
-
-    # Sidebar: margin control
-    margin_pct_ui = st.sidebar.slider(
-        "Extra margin around detection (%)",
-        min_value=0,
-        max_value=30,
-        value=8,
-        step=1,
-    ) / 100.0
-
-    uploaded = st.file_uploader("Upload PDF", type=["pdf"])
-
-    if not uploaded:
-        return
-
-    pdf_bytes = uploaded.read()
+    results: List[Dict] = []
 
     try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
     except Exception as e:
-        st.error(f"Could not open PDF: {e}")
-        return
+        st.error(f"Error opening {original_name}: {e}")
+        return results, ref_size or {}
 
-    st.success(f"Loaded PDF with {len(doc)} page(s).")
+    if len(doc) == 0:
+        st.warning(f"{original_name}: no pages.")
+        doc.close()
+        return results, ref_size or {}
 
-    with st.spinner("Detecting crop area from first page..."):
-        crop_rect, preview = detect_crop_rect(doc, margin_pct=margin_pct_ui)
+    seen_skus = set()
 
-    st.subheader("Crop preview (680 × 480 px)")
-    st.image(
-        preview,
-        caption="What each output page will look like",
-        width=TARGET_WIDTH,
-    )
+    # Initialize reference size if not already set
+    if ref_size is None:
+        ref_size = {}
 
-    with st.spinner("Reading REFERENCIA codes..."):
-        groups = extract_groups(doc)
+    for page_index in range(len(doc)):
+        page = doc[page_index]
 
-    if not groups:
-        st.error("No REFERENCIA codes were found in the document.")
-        return
-
-    st.subheader("Detected REFERENCIA groups")
-    summary_rows = [
-        {"REFERENCIA": ref, "Pages": len(pages)}
-        for ref, pages in sorted(groups.items())
-    ]
-    st.dataframe(summary_rows, hide_index=True)
-
-    if st.button("Generate cropped PDFs"):
-        with st.spinner("Building grouped & cropped PDFs..."):
-            outputs = build_group_pdfs(doc, groups, crop_rect)
-            zip_buffer = build_zip(outputs)
-
-        st.success("Done! Download your files below.")
-
-        # Individual downloads
-        for ref, (filename, buf) in outputs.items():
-            st.download_button(
-                label=f"Download {filename}",
-                data=buf,
-                file_name=filename,
-                mime="application/pdf",
-                key=f"download-{ref}",
-            )
-
-        # Zip download
-        st.download_button(
-            label="⬇️ Download all as ZIP",
-            data=zip_buffer,
-            file_name="carton_barcodes.zip",
-            mime="application/zip",
+        clip_rect = compute_first_label_clip(
+            page, cols=cols, padding_x=padding_x, padding_y=padding_y
         )
 
+        label_text = page.get_text("text", clip=clip_rect) or ""
+        sku = extract_sku(label_text)
 
-if __name__ == "__main__":
-    main()
+        if not sku:
+            continue
+
+        if sku in seen_skus:
+            continue  # already processed this SKU from this file
+
+        seen_skus.add(sku)
+
+        # ---- Define / use reference page size ----
+        if "width" not in ref_size or "height" not in ref_size:
+            # First label defines the canonical label size
+            ref_size["width"] = clip_rect.width
+            ref_size["height"] = clip_rect.height
+
+        target_width = ref_size["width"]
+        target_height = ref_size["height"]
+
+        # ---- Build filename: CHILE BARCODE HANGTAG <SKU>.pdf ----
+        out_name = f"CHILE BARCODE HANGTAG {sku}.pdf"
+
+        # Create a 1-page PDF with the cropped label, scaled to reference size
+        new_doc = fitz.open()
+        new_page = new_doc.new_page(
+            width=target_width,
+            height=target_height,
+        )
+        # Show the clip scaled into the full new_page.rect
+        new_page.show_pdf_page(
+            new_page.rect,
+            doc,
+            page_index,
+            clip=clip_rect,
+        )
+        pdf_bytes = new_doc.tobytes()
+        new_doc.close()
+
+        results.append(
+            {
+                "output_name": out_name,
+                "original_name": original_name,
+                "sku": sku,
+                "pdf_bytes": pdf_bytes,  # single-page PDF at reference size
+            }
+        )
+
+    doc.close()
+    return results, ref_size
+
+
+# ---------- Streamlit UI ----------
+
+st.set_page_config(page_title="Chile Label Extractor", page_icon="🏷️")
+
+st.title("🏷️ Chile Label Extractor – One PDF per SKU")
+
+st.markdown(
+    """
+### Step 1 – Upload & process
+
+Upload one or more **multi-page PDFs** with label sheets.
+
+For each PDF, this app will:
+
+- Scan all pages  
+- Look at the **leftmost label** on each page  
+- Extract the SKU in the format `C50039 0007 0001`  
+- Keep **only one label per SKU**  
+- Create a single-page PDF named:
+
+`CHILE BARCODE HANGTAG C50039 0007 0001.pdf`
+
+The **first label** processed defines the reference width and height.
+All other labels are scaled to that same page size.
+"""
+)
+
+uploaded_files = st.file_uploader(
+    "Upload your PDF files",
+    type=["pdf"],
+    accept_multiple_files=True,
+)
+
+cols = st.number_input("Labels across per page (columns)", min_value=1, value=3, step=1)
+padding_x = st.number_input("Horizontal padding (px)", min_value=0, value=5, step=1)
+padding_y = st.number_input("Vertical padding (px)", min_value=0, value=8, step=1)
+
+# Initialize session state store for processed labels and reference size
+if "processed_labels" not in st.session_state:
+    st.session_state["processed_labels"] = []
+
+if "ref_size" not in st.session_state:
+    st.session_state["ref_size"] = {}
+
+# ---- Step 1: Process PDFs ----
+
+if st.button("✅ Process PDFs (step 1)"):
+    if not uploaded_files:
+        st.warning("Please upload at least one PDF first.")
+    else:
+        all_labels: List[Dict] = []
+        ref_size = st.session_state.get("ref_size", {})
+
+        for f in uploaded_files:
+            st.write(f"**Processing:** {f.name}")
+            file_bytes = f.read()
+            labels, ref_size = process_pdf_bytes(
+                file_bytes,
+                f.name,
+                cols=int(cols),
+                padding_x=int(padding_x),
+                padding_y=int(padding_y),
+                ref_size=ref_size,
+            )
+            all_labels.extend(labels)
+
+        st.session_state["processed_labels"] = all_labels
+        st.session_state["ref_size"] = ref_size
+
+        if not all_labels:
+            st.warning("No labels with recognizable SKUs were found.")
+        else:
+            w = ref_size.get("width", None)
+            h = ref_size.get("height", None)
+            if w and h:
+                st.success(
+                    f"Found {len(all_labels)} unique labels (by SKU). "
+                    f"Reference label size: {w:.2f} × {h:.2f} points."
+                )
+            else:
+                st.success(f"Found {len(all_labels)} unique labels (by SKU).")
+
+
+processed_labels = st.session_state.get("processed_labels", [])
+
+# ---- Step 2: Per-label duplication & ZIP download ----
+
+if processed_labels:
+    st.markdown("---")
+    st.subheader("Step 2 – Choose pages per label and download")
+
+    st.markdown(
+        "For each label SKU below, set how many **pages** you want in the final PDF."
+    )
+
+    # Show per-label controls
+    for i, item in enumerate(processed_labels):
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            st.markdown(
+                f"- **{item['output_name']}**  "
+                f"(source: `{item['original_name']}`, SKU: `{item['sku']}`)"
+            )
+        with col2:
+            key = f"copies_{i}"
+            default_value = st.session_state.get(key, 1)
+            st.number_input(
+                "Pages",
+                min_value=1,
+                max_value=999,
+                value=default_value,
+                step=1,
+                key=key,
+            )
+
+    # Build ZIP using current page settings
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, item in enumerate(processed_labels):
+            copies = int(st.session_state.get(f"copies_{i}", 1))
+
+            # Open the single-page (already standardized size) PDF
+            base_pdf = fitz.open(stream=item["pdf_bytes"], filetype="pdf")
+            src_page = base_pdf[0]
+            rect = src_page.rect
+
+            # Build a new PDF with `copies` identical pages
+            new_doc = fitz.open()
+            for _ in range(max(1, copies)):
+                new_page = new_doc.new_page(width=rect.width, height=rect.height)
+                new_page.show_pdf_page(new_page.rect, base_pdf, 0)
+
+            pdf_bytes_multi = new_doc.tobytes()
+            new_doc.close()
+            base_pdf.close()
+
+            zf.writestr(item["output_name"], pdf_bytes_multi)
+
+    zip_buffer.seek(0)
+
+    st.download_button(
+        label="⬇️ Download labels as ZIP (step 2)",
+        data=zip_buffer.getvalue(),
+        file_name="labels_by_sku.zip",
+        mime="application/zip",
+    )
+else:
+    st.info("Upload PDFs and click **Process PDFs (step 1)** to start.")
