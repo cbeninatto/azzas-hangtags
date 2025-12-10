@@ -8,6 +8,13 @@ import streamlit as st
 import zipfile
 
 
+# ---------- Config ----------
+
+# Target single-label size taken from your reference PDF (C50039 0007 0001)
+REF_LABEL_WIDTH = 82.68998718261719
+REF_LABEL_HEIGHT = 78.56026458740234
+
+
 # ---------- Core PDF helpers ----------
 
 def compute_first_label_clip(page, cols=3, padding_x=5, padding_y=8):
@@ -110,24 +117,44 @@ def extract_sku(label_text: str) -> Optional[str]:
     return f"{m.group(1)}{m.group(2)} {m.group(3)} {m.group(4)}"
 
 
+def find_barcode_word_bbox(page, clip_rect):
+    """
+    Inside the label clip, find the 'word' that most likely corresponds
+    to the barcode digits (longest mostly-numeric word).
+    """
+    words = page.get_text("words", clip=clip_rect) or []
+    best = None
+    best_len = 0
+
+    for w in words:
+        x0, y0, x1, y1, text, *rest = w
+        digits = re.sub(r"\D", "", text)
+        if len(digits) > best_len:
+            best_len = len(digits)
+            best = (x0, y0, x1, y1, text, digits)
+
+    if best is None or best_len < 8:
+        return None  # no convincing barcode text found
+
+    return best
+
+
 def process_pdf_bytes(
     file_bytes: bytes,
     original_name: str,
     cols: int = 3,
     padding_x: int = 5,
     padding_y: int = 8,
-    ref_size: Optional[Dict[str, float]] = None,
-) -> (List[Dict], Dict[str, float]):
+) -> List[Dict]:
     """
     Process a single PDF (in-memory bytes).
 
-    Returns:
-      - list of dicts for each UNIQUE SKU found in the leftmost label.
-        Each dict contains a SINGLE-PAGE cropped PDF bytes and metadata.
-      - updated ref_size dict with 'width' and 'height' for the canonical label size.
+    Returns a list of dicts for each UNIQUE SKU found in the leftmost label across all pages.
+    Each dict contains a SINGLE-PAGE cropped PDF bytes and metadata.
 
-    The first label processed (overall, across uploads) defines the reference
-    width & height. All other labels are scaled to that same page size.
+    Cropping is *horizontally centered on the barcode digits* and scaled to the
+    fixed reference size REF_LABEL_WIDTH × REF_LABEL_HEIGHT, so the margin
+    from barcode to left/right edges is the same for all SKUs.
     """
     results: List[Dict] = []
 
@@ -135,61 +162,83 @@ def process_pdf_bytes(
         doc = fitz.open(stream=file_bytes, filetype="pdf")
     except Exception as e:
         st.error(f"Error opening {original_name}: {e}")
-        return results, ref_size or {}
+        return results
 
     if len(doc) == 0:
         st.warning(f"{original_name}: no pages.")
         doc.close()
-        return results, ref_size or {}
+        return results
 
     seen_skus = set()
-
-    # Initialize reference size if not already set
-    if ref_size is None:
-        ref_size = {}
 
     for page_index in range(len(doc)):
         page = doc[page_index]
 
-        clip_rect = compute_first_label_clip(
+        # 1) Rough label area from text clustering (leftmost column)
+        label_rect = compute_first_label_clip(
             page, cols=cols, padding_x=padding_x, padding_y=padding_y
         )
 
-        label_text = page.get_text("text", clip=clip_rect) or ""
+        # 2) Read SKU from that area
+        label_text = page.get_text("text", clip=label_rect) or ""
         sku = extract_sku(label_text)
-
         if not sku:
             continue
 
         if sku in seen_skus:
             continue  # already processed this SKU from this file
-
         seen_skus.add(sku)
 
-        # ---- Define / use reference page size ----
-        if "width" not in ref_size or "height" not in ref_size:
-            # First label defines the canonical label size
-            ref_size["width"] = clip_rect.width
-            ref_size["height"] = clip_rect.height
+        # 3) Find barcode digits bounding box inside the label
+        barcode_info = find_barcode_word_bbox(page, label_rect)
+        if barcode_info is None:
+            # Fallback: use label_rect as-is (will still be standardized later)
+            final_clip = label_rect
+        else:
+            bx0, by0, bx1, by1, text, digits = barcode_info
+            center_x = (bx0 + bx1) / 2.0
 
-        target_width = ref_size["width"]
-        target_height = ref_size["height"]
+            # Horizontally, we want a fixed width centered on the barcode digits
+            target_w = REF_LABEL_WIDTH
+            page_rect = page.rect
 
-        # ---- Build filename: CHILE BARCODE HANGTAG <SKU>.pdf ----
+            min_x = center_x - target_w / 2.0
+            max_x = center_x + target_w / 2.0
+
+            # Keep it inside the page
+            if min_x < 0:
+                shift = -min_x
+                min_x = 0
+                max_x += shift
+            if max_x > page_rect.width:
+                shift = max_x - page_rect.width
+                max_x = page_rect.width
+                min_x -= shift
+
+            # Vertically, align with the label_rect but match the reference height
+            target_h = REF_LABEL_HEIGHT
+            min_y = label_rect.y0
+            max_y = min_y + target_h
+            if max_y > page_rect.height:
+                max_y = page_rect.height
+                min_y = max_y - target_h
+
+            final_clip = fitz.Rect(min_x, min_y, max_x, max_y)
+
+        # 4) Build filename: CHILE BARCODE HANGTAG <SKU>.pdf
         out_name = f"CHILE BARCODE HANGTAG {sku}.pdf"
 
-        # Create a 1-page PDF with the cropped label, scaled to reference size
+        # 5) Create a 1-page PDF with the cropped label, scaled to reference size
         new_doc = fitz.open()
         new_page = new_doc.new_page(
-            width=target_width,
-            height=target_height,
+            width=REF_LABEL_WIDTH,
+            height=REF_LABEL_HEIGHT,
         )
-        # Show the clip scaled into the full new_page.rect
         new_page.show_pdf_page(
             new_page.rect,
             doc,
             page_index,
-            clip=clip_rect,
+            clip=final_clip,
         )
         pdf_bytes = new_doc.tobytes()
         new_doc.close()
@@ -204,7 +253,7 @@ def process_pdf_bytes(
         )
 
     doc.close()
-    return results, ref_size
+    return results
 
 
 # ---------- Streamlit UI ----------
@@ -229,8 +278,9 @@ For each PDF, this app will:
 
 `CHILE BARCODE HANGTAG C50039 0007 0001.pdf`
 
-The **first label** processed defines the reference width and height.
-All other labels are scaled to that same page size.
+The output page size is fixed to match your reference label,
+and the barcode is centered horizontally so the margins to the sides are identical
+for all SKUs.
 """
 )
 
@@ -244,12 +294,10 @@ cols = st.number_input("Labels across per page (columns)", min_value=1, value=3,
 padding_x = st.number_input("Horizontal padding (px)", min_value=0, value=5, step=1)
 padding_y = st.number_input("Vertical padding (px)", min_value=0, value=8, step=1)
 
-# Initialize session state store for processed labels and reference size
+# Initialize session state store for processed labels
 if "processed_labels" not in st.session_state:
     st.session_state["processed_labels"] = []
 
-if "ref_size" not in st.session_state:
-    st.session_state["ref_size"] = {}
 
 # ---- Step 1: Process PDFs ----
 
@@ -258,36 +306,24 @@ if st.button("✅ Process PDFs (step 1)"):
         st.warning("Please upload at least one PDF first.")
     else:
         all_labels: List[Dict] = []
-        ref_size = st.session_state.get("ref_size", {})
-
         for f in uploaded_files:
             st.write(f"**Processing:** {f.name}")
             file_bytes = f.read()
-            labels, ref_size = process_pdf_bytes(
+            labels = process_pdf_bytes(
                 file_bytes,
                 f.name,
                 cols=int(cols),
                 padding_x=int(padding_x),
                 padding_y=int(padding_y),
-                ref_size=ref_size,
             )
             all_labels.extend(labels)
 
         st.session_state["processed_labels"] = all_labels
-        st.session_state["ref_size"] = ref_size
 
         if not all_labels:
             st.warning("No labels with recognizable SKUs were found.")
         else:
-            w = ref_size.get("width", None)
-            h = ref_size.get("height", None)
-            if w and h:
-                st.success(
-                    f"Found {len(all_labels)} unique labels (by SKU). "
-                    f"Reference label size: {w:.2f} × {h:.2f} points."
-                )
-            else:
-                st.success(f"Found {len(all_labels)} unique labels (by SKU).")
+            st.success(f"Found {len(all_labels)} unique labels (by SKU). See Step 2 below.")
 
 
 processed_labels = st.session_state.get("processed_labels", [])
@@ -328,7 +364,7 @@ if processed_labels:
         for i, item in enumerate(processed_labels):
             copies = int(st.session_state.get(f"copies_{i}", 1))
 
-            # Open the single-page (already standardized size) PDF
+            # Open the standardized single-page PDF
             base_pdf = fitz.open(stream=item["pdf_bytes"], filetype="pdf")
             src_page = base_pdf[0]
             rect = src_page.rect
